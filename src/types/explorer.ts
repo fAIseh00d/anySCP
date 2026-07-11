@@ -83,8 +83,10 @@ export interface FileSystemProvider {
   joinPath(parent: string, child: string): string;
   /** Get the parent of a path. */
   parentPath(path: string): string;
-  /** Display label for the root (SFTP: "/", S3: bucket name, local: "/" or drive). */
+  /** Display label for the root (SFTP: "/", S3: bucket name). */
   rootLabel(): string;
+  /** Path-bar breadcrumb segments for a path, root-first. */
+  breadcrumbs(path: string): { label: string; path: string }[];
 
   // ─── Operations (async; map to backend commands) ─────────────────────────
   /** List a directory, normalized to `ExplorerEntry` rows. */

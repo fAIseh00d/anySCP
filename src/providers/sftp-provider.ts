@@ -65,6 +65,13 @@ export function createSftpProvider(
     rootLabel() {
       return "/";
     },
+    breadcrumbs(path) {
+      const parts = path.split("/").filter(Boolean);
+      return [
+        { label: "/", path: "/" },
+        ...parts.map((seg, i) => ({ label: seg, path: "/" + parts.slice(0, i + 1).join("/") })),
+      ];
+    },
 
     async listDir(path) {
       const entries = await explorerInvoke<SftpEntry[]>(transport, "list_dir", sessionId, { path });

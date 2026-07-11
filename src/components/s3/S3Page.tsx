@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Plus, Cloud, Search, Trash2, FolderOpen, Copy, Pencil } from "lucide-react";
 import type { S3Connection } from "../../types";
 import { useS3Store } from "../../stores/s3-store";
-import { S3Browser } from "./S3Browser";
+import { S3Explorer } from "./S3Explorer";
 import { S3ConnectDialog } from "./S3ConnectDialog";
 import { ContextMenu } from "../shared/ContextMenu";
 import { ConfirmDangerDialog } from "../shared/ConfirmDangerDialog";
@@ -85,7 +85,7 @@ export function S3Page() {
 
   // If actively browsing, show the browser
   if (activeSession) {
-    return <S3Browser sessionId={activeSession.sessionId} />;
+    return <S3Explorer sessionId={activeSession.sessionId} />;
   }
 
   const sessionList = Array.from(sessions.values());
