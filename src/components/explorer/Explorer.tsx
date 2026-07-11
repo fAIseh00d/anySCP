@@ -72,6 +72,31 @@ export function Explorer({ provider, isActive = true }: ExplorerProps) {
     [provider],
   );
 
+  // The one upload path for both the toolbar dialog and OS drag-drop: it
+  // pre-checks the destination for name collisions and, if any, pauses on the
+  // overwrite dialog (returning true) instead of silently clobbering; otherwise
+  // it uploads. Works for every backend via `provider.listDir`.
+  const startUpload = useCallback(
+    async (localPaths: string[], targetDir: string): Promise<boolean> => {
+      if (!provider.enqueueUpload || localPaths.length === 0) return false;
+      let conflicts: string[] = [];
+      try {
+        const existing = await provider.listDir(targetDir);
+        conflicts = conflictingNames(localPaths, new Set(existing.map((e) => e.name)));
+      } catch {
+        // Can't read the target (e.g. permissions) — skip the pre-check and let
+        // the upload proceed; a real failure surfaces in the transfer popover.
+      }
+      if (conflicts.length > 0) {
+        setPendingDrop({ localPaths, remoteDir: targetDir, conflicts });
+        return true;
+      }
+      await uploadDropped(localPaths, targetDir);
+      return false;
+    },
+    [provider, uploadDropped],
+  );
+
   const confirmOverwrite = useCallback(() => {
     const pd = pendingDrop;
     setPendingDrop(null);
@@ -142,20 +167,11 @@ export function Explorer({ provider, isActive = true }: ExplorerProps) {
             isProcessingDrop.current = true;
             const remoteDir = resolveDropDir(event.payload?.position);
 
-            void (async () => {
-              let conflicts: string[] = [];
-              try {
-                const existing = await provider.listDir(remoteDir);
-                conflicts = conflictingNames(paths, new Set(existing.map((e) => e.name)));
-              } catch { /* skip the pre-check; proceed to upload */ }
-
-              if (conflicts.length > 0) {
-                setPendingDrop({ localPaths: paths, remoteDir, conflicts });
-                return;
-              }
-              await uploadDropped(paths, remoteDir);
-              setTimeout(() => { isProcessingDrop.current = false; }, 500);
-            })();
+            void startUpload(paths, remoteDir).then((deferred) => {
+              // When deferred, the overwrite dialog owns the guard (reset by
+              // confirm/cancel); otherwise clear it once the upload is enqueued.
+              if (!deferred) setTimeout(() => { isProcessingDrop.current = false; }, 500);
+            });
           } else {
             setIsDragOver(false);
             setDropTargetDir(null);
@@ -168,7 +184,7 @@ export function Explorer({ provider, isActive = true }: ExplorerProps) {
 
     return () => { aborted = true; unlisten?.(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, isActive, resolveDropDir, uploadDropped]);
+  }, [sessionId, isActive, resolveDropDir, startUpload]);
 
   // ─── Auto-refresh on upload completion ────────────────────────────────────
 
@@ -264,36 +280,42 @@ export function Explorer({ provider, isActive = true }: ExplorerProps) {
 
   // ─── Download ──────────────────────────────────────────────────────────────
 
-  const handleDownload = useCallback(async (entry: ExplorerEntry) => {
-    try {
-      if (entry.entryType === "Directory") {
-        if (!provider.enqueueDownload) return; // e.g. S3 has no batch/dir download
-        const { open } = await import("@tauri-apps/plugin-dialog");
-        const localDir = (await open({ directory: true, title: `Download "${entry.name}" to…` })) as string | null;
-        if (!localDir) return;
-        await provider.enqueueDownload([entry.id], localDir);
-      } else {
-        const { save } = await import("@tauri-apps/plugin-dialog");
-        const savePath = await save({ defaultPath: entry.name, title: `Save "${entry.name}" as…` });
-        if (!savePath) return;
-        await provider.downloadAs?.(entry, savePath);
-      }
-    } catch (err) {
-      console.error("Download failed:", err);
-    }
-  }, [provider]);
-
-  const handleDownloadMany = useCallback(async (entries: ExplorerEntry[]) => {
-    if (entries.length === 0 || !provider.enqueueDownload) return;
+  // Ask for a destination folder once and queue the whole selection into it
+  // under their original names. Shared by the single-directory download and the
+  // multi-selection download.
+  const downloadInto = useCallback(async (entries: ExplorerEntry[], title: string) => {
+    if (!provider.enqueueDownload || entries.length === 0) return;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const localDir = (await open({ directory: true, title: `Download ${entries.length} items to…` })) as string | null;
+      const localDir = (await open({ directory: true, title })) as string | null;
       if (!localDir) return;
       await provider.enqueueDownload(entries.map((e) => e.id), localDir);
     } catch (err) {
       console.error("Download failed:", err);
     }
   }, [provider]);
+
+  const handleDownload = useCallback(async (entry: ExplorerEntry) => {
+    // A folder can only go into a chosen directory; a file gets a Save-as dialog
+    // so it can be renamed on the way down.
+    if (entry.entryType === "Directory") {
+      await downloadInto([entry], `Download "${entry.name}" to…`);
+      return;
+    }
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const savePath = await save({ defaultPath: entry.name, title: `Save "${entry.name}" as…` });
+      if (!savePath) return;
+      await provider.downloadAs?.(entry, savePath);
+    } catch (err) {
+      console.error("Download failed:", err);
+    }
+  }, [provider, downloadInto]);
+
+  const handleDownloadMany = useCallback(
+    (entries: ExplorerEntry[]) => downloadInto(entries, `Download ${entries.length} items to…`),
+    [downloadInto],
+  );
 
   // ─── Drag-out (Explorer → OS) ───────────────────────────────────────────────
 
@@ -324,10 +346,10 @@ export function Explorer({ provider, isActive = true }: ExplorerProps) {
       const selection = await open({ multiple: true, title: "Upload file" });
       if (!selection) return;
       const localPaths = Array.isArray(selection) ? selection : [selection];
-      if (localPaths.length === 0) return;
-      await provider.enqueueUpload?.(localPaths, currentPathRef.current);
+      // Same path as drag-drop: pre-checks conflicts and confirms before overwrite.
+      await startUpload(localPaths, currentPathRef.current);
     } catch { /* Upload errors surface in the transfer overlay */ }
-  }, [provider]);
+  }, [startUpload]);
 
   // ─── New folder/file (inline) ─────────────────────────────────────────────
 
@@ -410,53 +432,47 @@ export function Explorer({ provider, isActive = true }: ExplorerProps) {
 
   const [busy, setBusy] = useState(false);
 
-  const handlePaste = useCallback(async () => {
+  // Run a mutating op behind the busy spinner, refreshing the listing after and
+  // surfacing failures. Shared by paste, drag-move, and drag-copy.
+  const runBusy = useCallback(async (op: () => Promise<void>, errLabel: string) => {
+    setBusy(true);
+    try {
+      await op();
+      await loadDirectory(currentPathRef.current);
+    } catch (err) {
+      pane.setError(err instanceof Error ? err.message : errLabel);
+    } finally {
+      setBusy(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadDirectory]);
+
+  const handlePaste = useCallback(() => {
     const clip = pane.clipboard;
     if (!clip || clip.sourceSessionId !== sessionId) return;
     const sourceIds = clip.entries.map((e) => e.id);
-    const targetDir = currentPathRef.current;
-    setBusy(true);
-    try {
+    void runBusy(async () => {
       if (clip.operation === "cut") {
-        await provider.move?.(sourceIds, targetDir);
+        await provider.move?.(sourceIds, currentPathRef.current);
         pane.setClipboard(null);
       } else {
-        await provider.copy?.(sourceIds, targetDir);
+        await provider.copy?.(sourceIds, currentPathRef.current);
       }
-      await loadDirectory(targetDir);
-    } catch (err) {
-      pane.setError(err instanceof Error ? err.message : "Paste failed");
-    } finally {
-      setBusy(false);
-    }
+    }, "Paste failed");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider, sessionId, pane.clipboard, loadDirectory]);
+  }, [provider, sessionId, pane.clipboard, runBusy]);
 
-  const handleMoveEntries = useCallback(async (sourceIds: string[], targetDir: string) => {
-    setBusy(true);
-    try {
-      await provider.move?.(sourceIds, targetDir);
-      await loadDirectory(currentPathRef.current);
-    } catch (err) {
-      pane.setError(err instanceof Error ? err.message : "Move failed");
-    } finally {
-      setBusy(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider, loadDirectory]);
+  const handleMoveEntries = useCallback(
+    (sourceIds: string[], targetDir: string) =>
+      runBusy(async () => { await provider.move?.(sourceIds, targetDir); }, "Move failed"),
+    [provider, runBusy],
+  );
 
-  const handleCopyEntries = useCallback(async (sourceIds: string[], targetDir: string) => {
-    setBusy(true);
-    try {
-      await provider.copy?.(sourceIds, targetDir);
-      await loadDirectory(currentPathRef.current);
-    } catch (err) {
-      pane.setError(err instanceof Error ? err.message : "Copy failed");
-    } finally {
-      setBusy(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider, loadDirectory]);
+  const handleCopyEntries = useCallback(
+    (sourceIds: string[], targetDir: string) =>
+      runBusy(async () => { await provider.copy?.(sourceIds, targetDir); }, "Copy failed"),
+    [provider, runBusy],
+  );
 
   // ─── Render ────────────────────────────────────────────────────────────────
 
