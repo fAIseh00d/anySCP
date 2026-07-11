@@ -3,6 +3,7 @@ mod backup;
 mod db;
 mod editors;
 mod import;
+mod local;
 mod portforward;
 mod s3;
 mod scp;
@@ -204,6 +205,14 @@ pub fn run() {
             sftp::commands::sftp_list_transfers,
             sftp::commands::sftp_clear_finished_transfers,
             sftp::commands::sftp_set_concurrency,
+            // Local filesystem (dual-pane explorer — stateless, no manager)
+            local::commands::local_list_dir,
+            local::commands::local_home_dir,
+            local::commands::local_roots,
+            local::commands::local_mkdir,
+            local::commands::local_create_file,
+            local::commands::local_delete,
+            local::commands::local_rename,
             // SCP — session & filesystem (mirrors SFTP; used as a fallback
             // when the remote has the SFTP subsystem disabled)
             scp::commands::scp_open,

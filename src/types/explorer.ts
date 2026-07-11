@@ -67,14 +67,14 @@ export interface ProviderCapabilities {
 
 /**
  * Operations adapter — the single seam between the shared explorer UI and a
- * concrete backend (SFTP/SCP or S3). One provider-driven container renders every
- * backend; each provider maps the abstract operations below to its own commands
- * (e.g. `delete` → `sftp_delete` / `s3_delete_object`). Operations that a backend
- * can't do are left unimplemented and gated by the matching capability, so the
- * UI hides them.
+ * concrete backend (SFTP/SCP, S3, or the local filesystem). One provider-driven
+ * container renders every backend; each provider maps the abstract operations
+ * below to its own commands (e.g. `delete` → `sftp_delete` / `s3_delete_object`
+ * / `local_delete`). Operations that a backend can't do are left unimplemented
+ * and gated by the matching capability, so the UI hides them.
  */
 export interface FileSystemProvider {
-  readonly type: "sftp" | "scp" | "s3";
+  readonly type: "sftp" | "scp" | "s3" | "local";
   readonly sessionId: string;
   readonly capabilities: ProviderCapabilities;
 
@@ -83,7 +83,7 @@ export interface FileSystemProvider {
   joinPath(parent: string, child: string): string;
   /** Get the parent of a path. */
   parentPath(path: string): string;
-  /** Display label for the root (SFTP: "/", S3: bucket name). */
+  /** Display label for the root (SFTP: "/", S3: bucket name, local: "/" or drive). */
   rootLabel(): string;
   /** Path-bar breadcrumb segments for a path, root-first. */
   breadcrumbs(path: string): { label: string; path: string }[];

@@ -9,6 +9,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 import { createSftpProvider } from "./sftp-provider";
 import { createS3Provider } from "./s3-provider";
+import { createLocalProvider } from "./local-provider";
 import type { ExplorerEntry } from "../types/explorer";
 
 const dir = (id: string): ExplorerEntry => ({
@@ -117,5 +118,35 @@ describe("createS3Provider", () => {
     expect(p.capabilities.canRename).toBe(false);
     expect(p.rename).toBeUndefined();
     expect(p.move).toBeUndefined();
+  });
+});
+
+describe("createLocalProvider", () => {
+  it("lists via local_list_dir; delete/rename map to local_* args", async () => {
+    invoke.mockResolvedValueOnce([]);
+    const p = createLocalProvider("local:tab1");
+    expect(p.type).toBe("local");
+    await p.listDir("/home/ivan");
+    expect(argsOf("local_list_dir")).toEqual({ path: "/home/ivan" });
+
+    await p.delete(dir("/home/ivan/d"));
+    expect(argsOf("local_delete")).toEqual({ path: "/home/ivan/d", isDir: true });
+
+    await p.rename!(file("/home/ivan/a"), "/home/ivan/b");
+    expect(argsOf("local_rename")).toEqual({ oldPath: "/home/ivan/a", newPath: "/home/ivan/b" });
+  });
+
+  it("path helpers use the platform separator (Unix in tests)", () => {
+    const p = createLocalProvider("local:tab1");
+    expect(p.joinPath("/home/ivan", "docs")).toBe("/home/ivan/docs");
+    expect(p.parentPath("/home/ivan")).toBe("/home");
+    expect(p.parentPath("/a")).toBe("/");
+  });
+
+  it("has transfers off (cross-pane handles them)", () => {
+    const p = createLocalProvider("local:tab1");
+    expect(p.capabilities.canUpload).toBe(false);
+    expect(p.capabilities.canDownload).toBe(false);
+    expect(p.enqueueUpload).toBeUndefined();
   });
 });
