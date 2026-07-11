@@ -4,7 +4,7 @@ import { AlertCircle } from "lucide-react";
 import { useSftpStore } from "../../stores/sftp-store";
 import { useTabStore } from "../../stores/tab-store";
 import type { SftpEntry } from "../../types";
-import type { ExplorerEntry, ExplorerClipboard, ChmodResult, DragOutResult } from "../../types/explorer";
+import type { ExplorerEntry, ChmodResult, DragOutResult } from "../../types/explorer";
 import { ExplorerToolbar, ExplorerFileTable, ExplorerDropZone } from "../explorer";
 import { DropOverwriteDialog } from "./DropOverwriteDialog";
 import { createSftpProvider, toExplorerEntry } from "../../providers/sftp-provider";
@@ -108,8 +108,8 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
       if (row && row.dataset.entryType === "Directory") {
         const name = row.dataset.entryName;
         const entries = useSftpStore.getState().sessions.get(sessionId)?.entries ?? [];
-        const target = entries.find((e) => e.name === name && e.entry_type === "Directory");
-        if (target) return target.path;
+        const target = entries.find((e) => e.name === name && e.entryType === "Directory");
+        if (target) return target.id;
       }
       return base;
     },
@@ -249,7 +249,7 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
       setLoading(sessionId, true);
       try {
         const entries = await explorerInvoke<SftpEntry[]>(transport, "list_dir", sessionId, { path });
-        setEntries(sessionId, path, entries);
+        setEntries(sessionId, path, entries.map(toExplorerEntry));
       } catch (err: unknown) {
         setError(sessionId, errorMessage(err, "Failed to list directory"));
       }
@@ -319,7 +319,7 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
       const tryList = async (path: string): Promise<boolean> => {
         try {
           const entries = await explorerInvoke<SftpEntry[]>(transport, "list_dir", sessionId, { path });
-          setEntries(sessionId, path, entries);
+          setEntries(sessionId, path, entries.map(toExplorerEntry));
           return true;
         } catch {
           return false;
@@ -658,7 +658,7 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
     const clip = useSftpStore.getState().clipboard;
     if (!clip || clip.sourceSessionId !== sessionId || !session) return;
 
-    const sourcePaths = clip.entries.map((e) => e.path);
+    const sourcePaths = clip.entries.map((e) => e.id);
     const targetDir = session.currentPath;
 
     setBusy(true);
@@ -701,46 +701,9 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
     }
   }, [sessionId, transport, session, loadDirectory, setError]);
 
-  // ─── Clipboard adapter ───────────────────────────────────────────────────
-  // SftpClipboard uses SftpEntry with `path`, ExplorerClipboard uses ExplorerEntry with `id`.
-  // We bridge between the two here.
-
-  const explorerClipboard: ExplorerClipboard | null = clipboard
-    ? {
-        entries: clipboard.entries.map(toExplorerEntry),
-        operation: clipboard.operation,
-        sourceSessionId: clipboard.sourceSessionId,
-      }
-    : null;
-
-  const handleSetClipboard = useCallback((clip: ExplorerClipboard | null) => {
-    if (!clip) {
-      setClipboard(null);
-      return;
-    }
-    // Convert ExplorerEntry back to SftpEntry shape for the sftp store
-    const sftpEntries = clip.entries.map((e) => {
-      // Find the original sftp entry
-      const original = session?.entries.find((se) => se.path === e.id);
-      if (original) return original;
-      // Fallback: reconstruct minimal SftpEntry
-      return {
-        name: e.name,
-        path: e.id,
-        entry_type: e.entryType as "File" | "Directory" | "Symlink" | "Other",
-        size: e.size,
-        permissions: e.permissions ?? 0,
-        permissions_display: e.permissionsDisplay ?? "",
-        modified: e.modified,
-        is_symlink: e.isSymlink,
-      };
-    });
-    setClipboard({
-      entries: sftpEntries,
-      operation: clip.operation,
-      sourceSessionId: clip.sourceSessionId,
-    });
-  }, [setClipboard, session]);
+  // ─── Clipboard ─────────────────────────────────────────────────────────────
+  // The store now holds ExplorerClipboard directly, so no SftpEntry↔ExplorerEntry
+  // bridging is needed.
 
   // ─── Breadcrumb segments ──────────────────────────────────────────────────
 
@@ -756,10 +719,7 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
 
   // ─── Explorer entries ─────────────────────────────────────────────────────
 
-  const explorerEntries: ExplorerEntry[] = useMemo(
-    () => (session?.entries ?? []).map(toExplorerEntry),
-    [session?.entries],
-  );
+  const explorerEntries: ExplorerEntry[] = session?.entries ?? [];
 
   // ─── Guard ────────────────────────────────────────────────────────────────
 
@@ -801,8 +761,8 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
         sortBy={session.sortBy}
         sortAsc={session.sortAsc}
         onSortChange={(sortBy, sortAsc) => setSort(sessionId, sortBy, sortAsc)}
-        clipboard={explorerClipboard}
-        onSetClipboard={handleSetClipboard}
+        clipboard={clipboard}
+        onSetClipboard={setClipboard}
         onNavigate={(path) => void loadDirectory(path)}
         onDownload={(entry) => void handleDownload(entry)}
         onDownloadMany={(entries) => void handleDownloadMany(entries)}

@@ -137,7 +137,7 @@ export function S3Browser({ sessionId, isActive = true }: S3BrowserProps) {
         prefix,
         continuationToken: null,
       });
-      setEntries(sessionId, prefix, result.entries);
+      setEntries(sessionId, prefix, result.entries.map(toS3ExplorerEntry));
     } catch (err) {
       const msg = err && typeof err === "object" && "message" in err
         ? String((err as { message: string }).message) : "Failed to list objects";
@@ -373,10 +373,7 @@ export function S3Browser({ sessionId, isActive = true }: S3BrowserProps) {
 
   // ─── Explorer entries ─────────────────────────────────────────────────────
 
-  const explorerEntries: ExplorerEntry[] = useMemo(
-    () => (session?.entries ?? []).map(toS3ExplorerEntry),
-    [session?.entries],
-  );
+  const explorerEntries: ExplorerEntry[] = session?.entries ?? [];
 
   // ─── Guard ────────────────────────────────────────────────────────────────
 
