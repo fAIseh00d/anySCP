@@ -97,4 +97,33 @@ describe("Explorer — upload button (SFTP)", () => {
     await Promise.resolve();
     expect(enqueueCall()).toBeUndefined();
   });
+
+  it("pauses on the overwrite dialog when an uploaded name already exists", async () => {
+    // The destination already contains dup.txt.
+    invoke.mockImplementation(async (...args: unknown[]) =>
+      args[0] === "sftp_list_dir"
+        ? [{
+            name: "dup.txt",
+            path: `${CURRENT_PATH}/dup.txt`,
+            entry_type: "File",
+            size: 1,
+            permissions: 0,
+            permissions_display: "",
+            modified: 0,
+            is_symlink: false,
+          }]
+        : []);
+    dialogOpen.mockResolvedValue(["/local/dup.txt"]);
+
+    render(<Explorer provider={sftpProvider()} />);
+    fireEvent.click(await screen.findByTestId("explorer-upload"));
+
+    // The confirm dialog appears and nothing is uploaded yet (no silent clobber).
+    expect(await screen.findByTestId("explorer-overwrite-confirm-button")).toBeInTheDocument();
+    expect(enqueueCall()).toBeUndefined();
+
+    // Confirming proceeds with the upload.
+    fireEvent.click(screen.getByTestId("explorer-overwrite-confirm-button"));
+    await waitFor(() => expect(enqueueCall()).toBeDefined());
+  });
 });
