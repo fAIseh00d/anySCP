@@ -7,13 +7,17 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 // plugin, the event channel, and the drag-drop webview API. Mock them all so
 // the component mounts in jsdom without a real Tauri runtime.
 
-const { invoke, dialogOpen } = vi.hoisted(() => ({
+const { invoke, dialogOpen, toastError } = vi.hoisted(() => ({
   invoke: vi.fn(async (..._args: unknown[]) => [] as unknown),
   dialogOpen: vi.fn(),
+  toastError: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialogOpen }));
+vi.mock("../../stores/toast-store", () => ({
+  toast: { error: toastError, info: vi.fn(), success: vi.fn(), dismiss: vi.fn() },
+}));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async () => () => {}),
 }));
@@ -125,5 +129,31 @@ describe("Explorer — upload button (SFTP)", () => {
     // Confirming proceeds with the upload.
     fireEvent.click(screen.getByTestId("explorer-overwrite-confirm-button"));
     await waitFor(() => expect(enqueueCall()).toBeDefined());
+  });
+});
+
+describe("Explorer — create (SFTP)", () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    invoke.mockResolvedValue([]);
+    toastError.mockClear();
+    useSftpStore.setState({ sessions: new Map(), activeSftpSessionId: null, clipboard: null });
+    seedSession();
+  });
+
+  it("surfaces the backend error on a name collision instead of failing silently", async () => {
+    invoke.mockImplementation(async (...args: unknown[]) => {
+      if (args[0] === "sftp_mkdir") throw { message: "File exists" };
+      return [];
+    });
+
+    render(<Explorer provider={sftpProvider()} />);
+    document.dispatchEvent(new CustomEvent("explorer:new-folder"));
+    const input = await screen.findByTestId("explorer-new-folder-input");
+    fireEvent.change(input, { target: { value: "temp" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    expect(String(toastError.mock.calls[0][0])).toContain("File exists");
   });
 });

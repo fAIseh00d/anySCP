@@ -368,23 +368,32 @@ export function Explorer({ provider, isActive = true }: ExplorerProps) {
     };
   }, [isActive]);
 
-  const handleCreateFile = useCallback(async (name: string) => {
-    setCreatingFile(false);
-    if (!name.trim()) return;
-    try {
-      await provider.createFile(provider.joinPath(currentPathRef.current, name.trim()));
-      await loadDirectory(currentPathRef.current);
-    } catch { /* Error shown via refresh */ }
-  }, [provider, loadDirectory]);
+  // Create a file or folder in the current dir, refresh, and surface any backend
+  // failure — e.g. a name that collides with an existing entry (on Unix a file
+  // and folder can't share a name), which used to fail silently.
+  const createEntry = useCallback(
+    async (name: string, create: (path: string) => Promise<void>, kind: "file" | "folder") => {
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      try {
+        await create(provider.joinPath(currentPathRef.current, trimmed));
+        await loadDirectory(currentPathRef.current);
+      } catch (err) {
+        toast.error(`Couldn't create ${kind} "${trimmed}": ${errorMessage(err)}`);
+      }
+    },
+    [provider, loadDirectory],
+  );
 
-  const handleCreateFolder = useCallback(async (name: string) => {
+  const handleCreateFile = useCallback((name: string) => {
+    setCreatingFile(false);
+    void createEntry(name, (path) => provider.createFile(path), "file");
+  }, [provider, createEntry]);
+
+  const handleCreateFolder = useCallback((name: string) => {
     setCreatingFolder(false);
-    if (!name.trim()) return;
-    try {
-      await provider.mkdir(provider.joinPath(currentPathRef.current, name.trim()));
-      await loadDirectory(currentPathRef.current);
-    } catch { /* Error shown via refresh */ }
-  }, [provider, loadDirectory]);
+    void createEntry(name, (path) => provider.mkdir(path), "folder");
+  }, [provider, createEntry]);
 
   // ─── Delete / Rename / Permissions / Editor ────────────────────────────────
 
