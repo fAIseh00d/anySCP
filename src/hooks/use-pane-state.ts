@@ -1,5 +1,6 @@
 import { useSftpStore } from "../stores/sftp-store";
 import { useS3Store } from "../stores/s3-store";
+import { useLocalStore } from "../stores/local-store";
 import type { ExplorerEntry, ExplorerClipboard, FileSystemProvider } from "../types/explorer";
 
 type SortBy = "name" | "size" | "modified";
@@ -28,17 +29,37 @@ export interface PaneState {
 export function usePaneState(provider: FileSystemProvider): PaneState {
   const id = provider.sessionId;
   const isS3 = provider.type === "s3";
+  const isLocal = provider.type === "local";
 
-  // Both stores must be subscribed (rules of hooks), but the one that does NOT
-  // back this provider selects a constant so its subscription never fires — e.g.
+  // Every store is subscribed (rules of hooks), but the ones that don't back
+  // this provider select a constant so their subscriptions never fire — e.g.
   // copying in an S3 tab won't re-render every SFTP explorer (rerender-defer-reads).
-  const sftpSession = useSftpStore((s) => (isS3 ? undefined : s.sessions.get(id)));
-  const sftpClipboard = useSftpStore((s) => (isS3 ? null : s.clipboard));
+  const sftpSession = useSftpStore((s) => (isS3 || isLocal ? undefined : s.sessions.get(id)));
+  const sftpClipboard = useSftpStore((s) => (isS3 || isLocal ? null : s.clipboard));
   const s3Session = useS3Store((s) => (isS3 ? s.sessions.get(id) : undefined));
   const s3Clipboard = useS3Store((s) => (isS3 ? s.clipboard : null));
+  const localPane = useLocalStore((s) => (isLocal ? s.panes.get(id) : undefined));
 
   const sftp = useSftpStore.getState();
   const s3 = useS3Store.getState();
+  const local = useLocalStore.getState();
+
+  if (isLocal) {
+    return {
+      entries: localPane?.entries ?? [],
+      currentPath: localPane?.currentPath ?? "",
+      loading: localPane?.loading ?? false,
+      error: localPane?.error ?? null,
+      sortBy: localPane?.sortBy ?? "name",
+      sortAsc: localPane?.sortAsc ?? true,
+      clipboard: null, // local has no copy/paste (canCopyPaste is off)
+      setEntries: (path, entries) => local.setEntries(id, path, entries),
+      setLoading: (loading) => local.setLoading(id, loading),
+      setError: (error) => local.setError(id, error),
+      setSort: (sortBy, sortAsc) => local.setSort(id, sortBy, sortAsc),
+      setClipboard: () => {},
+    };
+  }
 
   if (isS3) {
     return {
