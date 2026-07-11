@@ -368,13 +368,26 @@ export function Explorer({ provider, isActive = true }: ExplorerProps) {
     };
   }, [isActive]);
 
+  // Whether a same-dir name already exists in the current listing. Guards create
+  // and rename against silent overwrites: `create_file` truncates and POSIX
+  // `rename` clobbers, so the backend won't error — we have to catch it here.
+  // Only simple names are checked; a nested path (a/b.txt) targets another dir.
+  const nameTaken = useCallback(
+    (name: string, excludeId?: string) =>
+      !name.includes("/") && pane.entries.some((e) => e.name === name && e.id !== excludeId),
+    [pane.entries],
+  );
+
   // Create a file or folder in the current dir, refresh, and surface any backend
-  // failure — e.g. a name that collides with an existing entry (on Unix a file
-  // and folder can't share a name), which used to fail silently.
+  // failure — e.g. a name that collides with an existing entry.
   const createEntry = useCallback(
     async (name: string, create: (path: string) => Promise<void>, kind: "file" | "folder") => {
       const trimmed = name.trim();
       if (!trimmed) return;
+      if (nameTaken(trimmed)) {
+        toast.error(`An item named "${trimmed}" already exists`);
+        return;
+      }
       try {
         await create(provider.joinPath(currentPathRef.current, trimmed));
         await loadDirectory(currentPathRef.current);
@@ -382,7 +395,7 @@ export function Explorer({ provider, isActive = true }: ExplorerProps) {
         toast.error(`Couldn't create ${kind} "${trimmed}": ${errorMessage(err)}`);
       }
     },
-    [provider, loadDirectory],
+    [provider, loadDirectory, nameTaken],
   );
 
   const handleCreateFile = useCallback((name: string) => {
@@ -405,14 +418,19 @@ export function Explorer({ provider, isActive = true }: ExplorerProps) {
   }, [provider, loadDirectory]);
 
   const handleRename = useCallback(async (entry: ExplorerEntry, newName: string) => {
-    const parent = provider.parentPath(entry.id);
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === entry.name) return;
+    if (nameTaken(trimmed, entry.id)) {
+      toast.error(`An item named "${trimmed}" already exists`);
+      return;
+    }
     try {
-      await provider.rename?.(entry, provider.joinPath(parent, newName));
+      await provider.rename?.(entry, provider.joinPath(provider.parentPath(entry.id), trimmed));
       void loadDirectory(currentPathRef.current);
     } catch (err) {
-      console.error("Rename failed:", err);
+      toast.error(`Rename failed: ${errorMessage(err)}`);
     }
-  }, [provider, loadDirectory]);
+  }, [provider, loadDirectory, nameTaken]);
 
   const handleApplyPermissions = useCallback(async (entry: ExplorerEntry, mode: number, recursive: boolean) => {
     const result = await provider.chmod?.(entry, mode, recursive);

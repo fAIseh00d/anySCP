@@ -156,4 +156,35 @@ describe("Explorer — create (SFTP)", () => {
     await waitFor(() => expect(toastError).toHaveBeenCalled());
     expect(String(toastError.mock.calls[0][0])).toContain("File exists");
   });
+
+  it("blocks creating a file whose name already exists (no silent overwrite)", async () => {
+    // The current dir already contains dup.txt.
+    invoke.mockImplementation(async (...args: unknown[]) =>
+      args[0] === "sftp_list_dir"
+        ? [{
+            name: "dup.txt",
+            path: `${CURRENT_PATH}/dup.txt`,
+            entry_type: "File",
+            size: 1,
+            permissions: 0,
+            permissions_display: "",
+            modified: 0,
+            is_symlink: false,
+          }]
+        : []);
+
+    render(<Explorer provider={sftpProvider()} />);
+    // Wait for the listing to load so the collision guard can see dup.txt.
+    await screen.findByTestId("explorer-entry-dup.txt");
+
+    document.dispatchEvent(new CustomEvent("explorer:new-file"));
+    const input = await screen.findByTestId("explorer-new-file-input");
+    fireEvent.change(input, { target: { value: "dup.txt" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    expect(String(toastError.mock.calls[0][0])).toContain("already exists");
+    // The create command must NOT have run.
+    expect(invoke.mock.calls.some((c) => c[0] === "sftp_create_file")).toBe(false);
+  });
 });
