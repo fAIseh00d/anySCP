@@ -48,6 +48,7 @@ interface SettingsState {
 
   // Explorer
   explorerDoubleClickAction: DoubleClickAction;
+  explorerDualPane: boolean;
 
   // Transfers
   transferConcurrency: number;
@@ -75,6 +76,7 @@ interface SettingsState {
   setTerminalCopyOnSelect: (enabled: boolean) => void;
   setTerminalPasteButton: (button: PasteButton) => void;
   setExplorerDoubleClickAction: (action: DoubleClickAction) => void;
+  setExplorerDualPane: (enabled: boolean) => void;
   setTransferConcurrency: (n: number) => void;
   addEditor: (editor: Omit<EditorConfig, "id">) => void;
   updateEditor: (id: string, patch: Partial<Omit<EditorConfig, "id">>) => void;
@@ -100,6 +102,7 @@ const DEFAULTS = {
   terminalCopyOnSelect: false,
   terminalPasteButton: "none" as PasteButton,
   explorerDoubleClickAction: "download" as DoubleClickAction,
+  explorerDualPane: false,
   transferConcurrency: 3,
   editors: [] as EditorConfig[],
   defaultEditorId: null as string | null,
@@ -280,6 +283,11 @@ export const useSettingsStore = create<SettingsState>((set) => ({
     persist("explorer_double_click_action", action);
   },
 
+  setExplorerDualPane: (enabled) => {
+    set({ explorerDualPane: enabled });
+    persist("explorer_dual_pane", enabled ? "true" : "false");
+  },
+
   setTerminalPasteButton: (button) => {
     set({ terminalPasteButton: button });
     persist("terminal_paste_button", button);
@@ -352,6 +360,7 @@ export const useSettingsStore = create<SettingsState>((set) => ({
           case "terminal_copy_on_select": updates.terminalCopyOnSelect = value === "true"; break;
           case "terminal_paste_button": updates.terminalPasteButton = value === "right" || value === "middle" ? value : DEFAULTS.terminalPasteButton; break;
           case "explorer_double_click_action": updates.explorerDoubleClickAction = value === "open" ? "open" : "download"; break;
+          case "explorer_dual_pane": updates.explorerDualPane = value === "true"; break;
           case "transfer_concurrency": updates.transferConcurrency = Number(value) || DEFAULTS.transferConcurrency; break;
           case "app_interface_font": updates.interfaceFont = value || DEFAULTS.interfaceFont; break;
           case "app_auto_update": updates.autoUpdate = value !== "false"; break;
