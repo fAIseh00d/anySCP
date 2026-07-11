@@ -1,6 +1,8 @@
+import { useMemo } from "react";
 import { FolderOpen, Cloud } from "lucide-react";
-import { ExplorerView } from "./ExplorerView";
-import { S3Browser } from "../s3/S3Browser";
+import { Explorer } from "../explorer/Explorer";
+import { S3Explorer } from "../s3/S3Explorer";
+import { createSftpProvider } from "../../providers/sftp-provider";
 import { useSftpStore } from "../../stores/sftp-store";
 import { useS3Store } from "../../stores/s3-store";
 import type { Transport } from "../../lib/explorer-transport";
@@ -27,6 +29,11 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
   const isSftp = !!sftpSessionId;
   const Icon = isSftp ? FolderOpen : Cloud;
 
+  const sftpProvider = useMemo(
+    () => (sftpSessionId ? createSftpProvider(sftpSessionId, transport) : null),
+    [sftpSessionId, transport],
+  );
+
   return (
     <div className="flex flex-col h-full p-2">
       <div className="flex flex-col flex-1 min-h-0 rounded-lg overflow-hidden border border-border/60">
@@ -43,8 +50,8 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
           className="flex-1 min-h-0 bg-bg-base"
           data-explorer-transport={sftpSessionId ? transport : s3SessionId ? "s3" : undefined}
         >
-          {sftpSessionId && <ExplorerView sessionId={sftpSessionId} transport={transport} isActive={isActive} />}
-          {s3SessionId && <S3Browser sessionId={s3SessionId} isActive={isActive} />}
+          {sftpSessionId && sftpProvider && <Explorer provider={sftpProvider} isActive={isActive} />}
+          {s3SessionId && <S3Explorer sessionId={s3SessionId} isActive={isActive} />}
         </div>
       </div>
     </div>

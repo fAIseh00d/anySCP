@@ -23,8 +23,11 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   }),
 }));
 
-import { ExplorerView } from "./ExplorerView";
+import { Explorer } from "./Explorer";
+import { createSftpProvider } from "../../providers/sftp-provider";
 import { useSftpStore } from "../../stores/sftp-store";
+
+const sftpProvider = () => createSftpProvider(SESSION_ID);
 
 const SESSION_ID = "sess-1";
 const CURRENT_PATH = "/home/user";
@@ -41,7 +44,7 @@ function enqueueCall(): unknown[] | undefined {
   return invoke.mock.calls.find((c) => c[0] === "sftp_enqueue_upload");
 }
 
-describe("ExplorerView — upload button", () => {
+describe("Explorer — upload button (SFTP)", () => {
   beforeEach(() => {
     invoke.mockClear();
     invoke.mockResolvedValue([]);
@@ -54,7 +57,7 @@ describe("ExplorerView — upload button", () => {
   it("opens the native file picker and enqueues the selected files (issue #69)", async () => {
     dialogOpen.mockResolvedValue(["/local/a.txt", "/local/b.txt"]);
 
-    render(<ExplorerView sessionId={SESSION_ID} />);
+    render(<Explorer provider={sftpProvider()} />);
     fireEvent.click(await screen.findByTestId("explorer-upload"));
 
     await waitFor(() => expect(dialogOpen).toHaveBeenCalledTimes(1));
@@ -73,7 +76,7 @@ describe("ExplorerView — upload button", () => {
   it("normalizes a single-path selection into a one-element array", async () => {
     dialogOpen.mockResolvedValue("/local/only.txt");
 
-    render(<ExplorerView sessionId={SESSION_ID} />);
+    render(<Explorer provider={sftpProvider()} />);
     fireEvent.click(await screen.findByTestId("explorer-upload"));
 
     await waitFor(() => expect(enqueueCall()).toBeDefined());
@@ -86,7 +89,7 @@ describe("ExplorerView — upload button", () => {
   it("enqueues nothing when the picker is cancelled", async () => {
     dialogOpen.mockResolvedValue(null);
 
-    render(<ExplorerView sessionId={SESSION_ID} />);
+    render(<Explorer provider={sftpProvider()} />);
     fireEvent.click(await screen.findByTestId("explorer-upload"));
 
     await waitFor(() => expect(dialogOpen).toHaveBeenCalledTimes(1));

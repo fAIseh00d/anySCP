@@ -57,6 +57,13 @@ export function createS3Provider(
     rootLabel() {
       return bucketName;
     },
+    breadcrumbs(prefix) {
+      const parts = prefix.split("/").filter(Boolean);
+      return [
+        { label: bucketName, path: "" },
+        ...parts.map((seg, i) => ({ label: seg, path: parts.slice(0, i + 1).join("/") + "/" })),
+      ];
+    },
 
     async listDir(prefix) {
       const result = await invoke<S3ListResult>("s3_list_objects", {
