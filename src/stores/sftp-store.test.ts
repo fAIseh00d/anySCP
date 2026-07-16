@@ -51,6 +51,26 @@ describe("sftp-store setStatusBySsh", () => {
     expect(useSftpStore.getState().sessions).toBe(before);
   });
 
+  it("markDisconnected flips a live session down but never clobbers an Error", () => {
+    const { openSession, markDisconnected, setStatusBySsh } = useSftpStore.getState();
+    openSession("sftpA", "ssh1", "a");
+
+    markDisconnected("sftpA", "channel closed");
+    expect(useSftpStore.getState().sessions.get("sftpA")).toMatchObject({
+      status: "Disconnected",
+      statusMessage: "channel closed",
+    });
+
+    // An existing Error status is more specific — keep it.
+    openSession("sftpB", "ssh2", "b");
+    setStatusBySsh("ssh2", "Error", "auth failed");
+    markDisconnected("sftpB", "channel closed");
+    expect(useSftpStore.getState().sessions.get("sftpB")).toMatchObject({
+      status: "Error",
+      statusMessage: "auth failed",
+    });
+  });
+
   it("clears back to Connected on a recovery event", () => {
     const { openSession, setStatusBySsh } = useSftpStore.getState();
     openSession("sftpA", "ssh1", "a");

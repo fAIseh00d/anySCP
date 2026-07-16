@@ -44,6 +44,10 @@ interface SftpState {
   /** Route an `ssh:status` change to every explorer session riding on that SSH
    *  connection (matched by `sshSessionId`). No-op if none match. */
   setStatusBySsh: (sshSessionId: string, status: ConnectionStatus, message?: string) => void;
+  /** Flip one session to Disconnected — called when an operation fails with a
+   *  connection-level error, so the reconnect overlay appears on the user's
+   *  action instead of waiting for the keepalive monitor (terminal parity). */
+  markDisconnected: (sftpSessionId: string, message?: string) => void;
   setActiveSftpSession: (id: string | null) => void;
   setEntries: (sftpSessionId: string, path: string, entries: ExplorerEntry[]) => void;
   setLoading: (sftpSessionId: string, loading: boolean) => void;
@@ -126,6 +130,16 @@ export const useSftpStore = create<SftpState>((set) => ({
         }
       }
       return changed ? { sessions: next } : state;
+    }),
+
+  markDisconnected: (sftpSessionId, message) =>
+    set((state) => {
+      const session = state.sessions.get(sftpSessionId);
+      // Already down → keep the original status/message (don't clobber an Error).
+      if (!session || session.status === "Disconnected" || session.status === "Error") return state;
+      const next = new Map(state.sessions);
+      next.set(sftpSessionId, { ...session, status: "Disconnected", statusMessage: message });
+      return { sessions: next };
     }),
 
   setActiveSftpSession: (id) =>
