@@ -52,6 +52,21 @@ pub async fn ssh_cancel_connect(
     Ok(state.cancel_connect(&attempt_id))
 }
 
+/// Re-dial a dead session's connection under the same session id (recovery,
+/// not replacement — tab, pane, and scrollback identity are preserved).
+#[tauri::command]
+pub async fn ssh_reconnect(
+    session_id: String,
+    state: State<'_, SshManager>,
+    app_handle: AppHandle,
+) -> Result<(), SshError> {
+    let result = state.reconnect(&session_id, app_handle).await;
+    if result.is_ok() {
+        crate::telemetry::capture("ssh_reconnected", serde_json::json!({}));
+    }
+    result
+}
+
 #[tauri::command]
 pub async fn ssh_disconnect(
     session_id: String,

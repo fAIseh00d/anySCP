@@ -479,6 +479,83 @@ impl SshManager {
         Ok(new_id)
     }
 
+    /// Re-dial a dead session's connection **under the same session id**.
+    ///
+    /// This is recovery, not replacement: the logical session (tab, pane,
+    /// xterm buffer) keeps its identity, and only the transport underneath is
+    /// swapped. The new connection + PTY are established fully off to the side
+    /// first; the map entry is replaced only at the commit point below, so a
+    /// failed (or dropped/cancelled) reconnect leaves the old entry untouched
+    /// and a retry is idempotent. Emits `Connecting` and, via `open_pty`,
+    /// `Connected` — both on the existing session id, so the frontend's
+    /// existing status routing drives the overlay with no new events.
+    ///
+    /// Split panes reconnect independently in v1 (each carries its own
+    /// HostConfig); a shared-connection group reconnect is a later refinement.
+    pub async fn reconnect(
+        &self,
+        session_id: &str,
+        app_handle: AppHandle,
+    ) -> Result<(), SshError> {
+        let config = {
+            let entry = self
+                .sessions
+                .get(session_id)
+                .ok_or_else(|| SshError::SessionNotFound(session_id.to_string()))?;
+            entry.value().host_config()
+        };
+
+        let _ = app_handle.emit(
+            "ssh:status",
+            &SshStatusPayload {
+                session_id: session_id.to_string(),
+                status: ConnectionStatus::Connecting,
+            },
+        );
+
+        let russh_config = Self::build_russh_config(&config);
+        let outcome = async {
+            let (handle, jump_handles) = Self::establish(&config, russh_config).await?;
+            SshSession::open_pty(
+                handle,
+                Arc::new(jump_handles),
+                session_id.to_string(),
+                80,
+                24,
+                app_handle.clone(),
+                config.clone(),
+            )
+            .await
+        }
+        .await;
+
+        match outcome {
+            Ok(new_session) => {
+                // Commit point: swap the dead session out under the same id.
+                // Its reader task already ended with the connection; disconnect()
+                // is best-effort cleanup of the channel task.
+                if let Some((_, old)) = self.sessions.remove(session_id) {
+                    let _ = old.disconnect().await;
+                }
+                self.sessions.insert(session_id.to_string(), new_session);
+                info!(session_id = %session_id, host = %config.host, "SSH reconnected");
+                Ok(())
+            }
+            Err(e) => {
+                // Surface the failure on the same id; the old entry stays so the
+                // user (or auto-retry) can try again.
+                let _ = app_handle.emit(
+                    "ssh:status",
+                    &SshStatusPayload {
+                        session_id: session_id.to_string(),
+                        status: ConnectionStatus::Error(e.to_string()),
+                    },
+                );
+                Err(e)
+            }
+        }
+    }
+
     /// Send bytes to a session's PTY channel.
     pub async fn send_input(&self, session_id: &str, data: &[u8]) -> Result<(), SshError> {
         let entry = self

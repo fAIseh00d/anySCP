@@ -235,6 +235,7 @@ pub fn run() {
             ssh::commands::ssh_connect,
             ssh::commands::ssh_cancel_connect,
             ssh::commands::ssh_split_session,
+            ssh::commands::ssh_reconnect,
             ssh::commands::ssh_disconnect,
             ssh::commands::ssh_send_input,
             ssh::commands::ssh_resize_pty,
