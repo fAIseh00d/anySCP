@@ -11,6 +11,7 @@ mod sftp;
 mod snippets;
 mod ssh;
 pub mod telemetry;
+mod transfer_common;
 mod types;
 mod vault;
 

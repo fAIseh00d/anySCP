@@ -1076,7 +1076,11 @@ async fn run_download_file(
             .map_err(|e| SftpError::LocalIoError(e.to_string()))?;
     }
 
-    let mut local_file = tokio::fs::File::create(local_path)
+    // Stage into `<name>.part`; the final name appears only on completion (the
+    // rename below). A user cancel removes the staging file; a FAILURE keeps it
+    // so retry can resume from that offset instead of starting over.
+    let part_path = crate::transfer_common::part_path_for(local_path);
+    let mut local_file = tokio::fs::File::create(&part_path)
         .await
         .map_err(|e| SftpError::LocalIoError(e.to_string()))?;
 
@@ -1084,7 +1088,7 @@ async fn run_download_file(
 
     loop {
         if cancel_token.is_cancelled() {
-            let _ = tokio::fs::remove_file(local_path).await;
+            let _ = tokio::fs::remove_file(&part_path).await;
             return Err(SftpError::TransferCancelled);
         }
 
@@ -1101,7 +1105,11 @@ async fn run_download_file(
             .await
             .map_err(|e| SftpError::LocalIoError(e.to_string()))?;
 
-        update_progress(jobs, job_id, n as u64, cancel_token, app_handle)?;
+        if let Err(e) = update_progress(jobs, job_id, n as u64, cancel_token, app_handle) {
+            // Cancellation is the only error update_progress returns.
+            let _ = tokio::fs::remove_file(&part_path).await;
+            return Err(e);
+        }
     }
 
     local_file
@@ -1113,6 +1121,12 @@ async fn run_download_file(
         .shutdown()
         .await
         .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+
+    // Move the completed download into place — done last, so any earlier
+    // failure leaves only the .part behind, never a truncated final file.
+    tokio::fs::rename(&part_path, local_path)
+        .await
+        .map_err(|e| SftpError::LocalIoError(e.to_string()))?;
 
     // Mark this file done.
     if let Some(mut job) = jobs.get_mut(job_id) {

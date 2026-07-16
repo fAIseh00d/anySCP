@@ -157,8 +157,12 @@ where
     // Ack the header so the source starts streaming the body.
     wire::write_ack(&mut stream).await?;
 
-    let mut local_file = tokio::fs::File::create(local_path).await.map_err(|e| {
-        ScpError::LocalIoError(format!("cannot create {}: {e}", local_path.display()))
+    // Stage into `<name>.part` and rename into place on success, so the final
+    // name never holds partial bytes. Unlike SFTP, a failed staging file is
+    // removed outright — the SCP protocol has no offsets, so it can't resume.
+    let part_path = crate::transfer_common::part_path_for(local_path);
+    let mut local_file = tokio::fs::File::create(&part_path).await.map_err(|e| {
+        ScpError::LocalIoError(format!("cannot create {}: {e}", part_path.display()))
     })?;
 
     let stream_result = wire::stream_bytes(
@@ -171,23 +175,34 @@ where
     )
     .await;
 
-    if let Err(e) = stream_result {
-        // Clean up the partial local file before surfacing the error.
+    // Everything up to the trailing ack counts toward a complete download; any
+    // failure discards the staging file before surfacing the error.
+    let finish: Result<(), ScpError> = match stream_result {
+        Err(e) => Err(e),
+        Ok(()) => async {
+            local_file
+                .flush()
+                .await
+                .map_err(|e| ScpError::LocalIoError(e.to_string()))?;
+            // Read the source's trailing status byte, then ack it.
+            wire::read_ack(&mut stream).await?;
+            wire::write_ack(&mut stream).await?;
+            Ok(())
+        }
+        .await,
+    };
+
+    if let Err(e) = finish {
         drop(local_file);
-        let _ = tokio::fs::remove_file(local_path).await;
+        let _ = tokio::fs::remove_file(&part_path).await;
         return Err(e);
     }
 
-    local_file
-        .flush()
+    let _ = stream.shutdown().await;
+
+    tokio::fs::rename(&part_path, local_path)
         .await
         .map_err(|e| ScpError::LocalIoError(e.to_string()))?;
-
-    // Read the source's trailing status byte, then ack it.
-    wire::read_ack(&mut stream).await?;
-    wire::write_ack(&mut stream).await?;
-
-    let _ = stream.shutdown().await;
     Ok(())
 }
 
