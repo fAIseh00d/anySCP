@@ -18,7 +18,7 @@ impl fmt::Display for SessionId {
 }
 
 /// How to authenticate to the remote host.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AuthMethod {
     /// Plaintext password (kept only in Rust memory).
@@ -36,6 +36,33 @@ pub enum AuthMethod {
         key_data: String,
         passphrase: Option<String>,
     },
+}
+
+/// Redacting `Debug`: sessions hold their `HostConfig` (and thus credentials)
+/// in memory for reconnect, so a derived impl would leak the password /
+/// passphrase / raw key into any `{:?}` log line or a future `#[instrument]`
+/// capture. Variants are fully destructured so adding a field is a compile
+/// error here — a new secret can't slip into Debug output unreviewed.
+impl std::fmt::Debug for AuthMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const REDACTED: &str = "<redacted>";
+        match self {
+            AuthMethod::Password { password: _ } => f
+                .debug_struct("Password")
+                .field("password", &REDACTED)
+                .finish(),
+            AuthMethod::PrivateKey { key_path, passphrase } => f
+                .debug_struct("PrivateKey")
+                .field("key_path", key_path)
+                .field("passphrase", &passphrase.as_ref().map(|_| REDACTED))
+                .finish(),
+            AuthMethod::PrivateKeyData { key_data: _, passphrase } => f
+                .debug_struct("PrivateKeyData")
+                .field("key_data", &REDACTED)
+                .field("passphrase", &passphrase.as_ref().map(|_| REDACTED))
+                .finish(),
+        }
+    }
 }
 
 /// Everything needed to open an SSH connection.
@@ -73,4 +100,37 @@ pub enum ConnectionStatus {
     Disconnecting,
     Disconnected,
     Error(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sessions keep credentials in memory for reconnect — Debug output must
+    /// never contain them, only the redaction marker.
+    #[test]
+    fn auth_method_debug_redacts_all_secrets() {
+        let cases = [
+            AuthMethod::Password { password: "hunter2".into() },
+            AuthMethod::PrivateKey {
+                key_path: "/home/u/.ssh/id_ed25519".into(),
+                passphrase: Some("hunter2".into()),
+            },
+            AuthMethod::PrivateKeyData {
+                key_data: "-----BEGIN OPENSSH PRIVATE KEY-----hunter2".into(),
+                passphrase: Some("hunter2".into()),
+            },
+        ];
+        for auth in cases {
+            let dbg = format!("{auth:?}");
+            assert!(!dbg.contains("hunter2"), "secret leaked into Debug: {dbg}");
+            assert!(dbg.contains("<redacted>"));
+        }
+        // Non-secret context stays visible for troubleshooting.
+        let dbg = format!(
+            "{:?}",
+            AuthMethod::PrivateKey { key_path: "/k".into(), passphrase: None }
+        );
+        assert!(dbg.contains("/k"));
+    }
 }
