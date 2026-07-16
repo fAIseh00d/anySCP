@@ -16,7 +16,7 @@ function replacePane(
   replacement: LayoutNode,
 ): LayoutNode {
   if (node.type === "pane") {
-    return node.sessionId === targetSessionId ? replacement : node;
+    return node.content.sessionId === targetSessionId ? replacement : node;
   }
   return {
     ...node,
@@ -32,11 +32,11 @@ function removePane(
   targetSessionId: string,
 ): LayoutNode | null {
   if (node.type === "pane") {
-    return node.sessionId === targetSessionId ? null : node;
+    return node.content.sessionId === targetSessionId ? null : node;
   }
   const [left, right] = node.children;
-  if (left.type === "pane" && left.sessionId === targetSessionId) return right;
-  if (right.type === "pane" && right.sessionId === targetSessionId) return left;
+  if (left.type === "pane" && left.content.sessionId === targetSessionId) return right;
+  if (right.type === "pane" && right.content.sessionId === targetSessionId) return left;
   const newLeft = removePane(left, targetSessionId);
   const newRight = removePane(right, targetSessionId);
   if (newLeft === null) return right;
@@ -83,13 +83,13 @@ function findTabForSession(
 }
 
 function containsSession(node: LayoutNode, sessionId: string): boolean {
-  if (node.type === "pane") return node.sessionId === sessionId;
+  if (node.type === "pane") return node.content.sessionId === sessionId;
   return containsSession(node.children[0], sessionId) || containsSession(node.children[1], sessionId);
 }
 
 /** Collect all session IDs from a layout tree. */
 function collectSessionIds(node: LayoutNode): string[] {
-  if (node.type === "pane") return [node.sessionId];
+  if (node.type === "pane") return [node.content.sessionId];
   return [...collectSessionIds(node.children[0]), ...collectSessionIds(node.children[1])];
 }
 
@@ -143,7 +143,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       // New connection = new layout tree entry
       const tabs = new Map(state.tabs);
       tabs.set(id, {
-        layout: { type: "pane", sessionId: id },
+        layout: { type: "pane", content: { kind: "terminal", sessionId: id } },
         label: `${hostConfig.username}@${hostConfig.host}`,
       });
 
@@ -269,8 +269,8 @@ export const useSessionStore = create<SessionState>((set) => ({
         direction,
         ratio: 0.5,
         children: [
-          { type: "pane", sessionId: targetSessionId },
-          { type: "pane", sessionId: newSessionId },
+          { type: "pane", content: { kind: "terminal", sessionId: targetSessionId } },
+          { type: "pane", content: { kind: "terminal", sessionId: newSessionId } },
         ],
       };
 

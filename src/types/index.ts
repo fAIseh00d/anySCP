@@ -22,6 +22,7 @@ export type {
   SplitDirection,
   SplitNode,
   PaneNode,
+  PaneContent,
   LayoutNode,
 } from "./layout";
 
