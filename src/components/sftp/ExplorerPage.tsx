@@ -9,7 +9,7 @@ import { useS3Store } from "../../stores/s3-store";
 import { useSettingsStore } from "../../stores/settings-store";
 import { WorkspaceArea } from "../workspace/WorkspaceArea";
 import type { Transport } from "../../lib/explorer-transport";
-import type { LayoutNode, PaneContent } from "../../types";
+import type { ConnectionStatus, LayoutNode, PaneContent } from "../../types";
 
 interface ExplorerPageProps {
   /** SFTP/SCP transport session id (both live in the sftp store). */
@@ -28,10 +28,26 @@ interface ExplorerPageProps {
  * (not flex-1) so it works inside a split child, which is a plain block. In
  * dual-pane it shows an accent border when focused; a mousedown focuses it.
  */
+/** SSH-link state → header-icon tint. Disconnected/Error go red so a dropped
+ *  explorer connection is visible at a glance (previously always green). */
+function statusColor(status: ConnectionStatus): string {
+  switch (status) {
+    case "Disconnected":
+    case "Error":
+      return "text-status-error";
+    case "Connecting":
+    case "Disconnecting":
+      return "text-status-connecting";
+    default:
+      return "text-status-connected";
+  }
+}
+
 function ExplorerPane({
   icon: Icon,
   label,
   transport,
+  status = "Connected",
   highlighted,
   onActivate,
   children,
@@ -39,6 +55,7 @@ function ExplorerPane({
   icon: React.ElementType;
   label: string;
   transport?: string;
+  status?: ConnectionStatus;
   highlighted: boolean;
   onActivate: () => void;
   children: React.ReactNode;
@@ -53,7 +70,7 @@ function ExplorerPane({
     >
       {/* Pane header — matching terminal pane style */}
       <div className="flex items-center h-8 px-2.5 gap-2.5 shrink-0 no-select bg-bg-surface/80 border-b border-border/60">
-        <Icon size={14} strokeWidth={1.8} className="shrink-0 text-status-connected" aria-hidden="true" />
+        <Icon size={14} strokeWidth={1.8} className={`shrink-0 ${statusColor(status)}`} aria-hidden="true" />
         <span className="text-[11px] font-mono truncate flex-1 min-w-0 text-text-primary leading-none" title={label}>
           {label}
         </span>
@@ -132,7 +149,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
     }
     if (content.kind === "sftp") {
       return (
-        <ExplorerPane icon={FolderOpen} label={label} transport={content.transport} highlighted={highlighted} onActivate={onActivate}>
+        <ExplorerPane icon={FolderOpen} label={label} transport={content.transport} status={sftpSession?.status} highlighted={highlighted} onActivate={onActivate}>
           {sftpProvider && <Explorer provider={sftpProvider} isActive={paneActive} />}
         </ExplorerPane>
       );

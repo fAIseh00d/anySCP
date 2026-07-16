@@ -1,14 +1,22 @@
 import { create } from "zustand";
 import type { ExplorerEntry, ExplorerClipboard } from "../types/explorer";
+import type { ConnectionStatus } from "../types";
 
 // ─── Session shape ────────────────────────────────────────────────────────────
 
 export interface SftpSession {
   sftpSessionId: string;
   sshSessionId: string;
+  /** Saved-host id this explorer was dialed from, if any — lets the reconnect
+   *  overlay re-dial through the OS keychain. Undefined for ad-hoc sessions. */
+  hostId?: string;
   label: string;
   username: string;
   sudoMode: boolean;
+  /** Connection state of the underlying SSH link, driven by `ssh:status`
+   *  (routed here by `use-ssh-status` via `sshSessionId`). Starts "Connected". */
+  status: ConnectionStatus;
+  statusMessage?: string;
   currentPath: string;
   /** Configured initial directory for this host's file browser (empty = home).
    *  May contain a leading `~` to expand against the remote home directory. */
@@ -29,10 +37,13 @@ interface SftpState {
   activeSftpSessionId: string | null;
   clipboard: ExplorerClipboard | null;
 
-  openSession: (sftpSessionId: string, sshSessionId: string, label: string, username?: string, sudoMode?: boolean, startDirectory?: string) => void;
+  openSession: (sftpSessionId: string, sshSessionId: string, label: string, username?: string, sudoMode?: boolean, startDirectory?: string, hostId?: string) => void;
   closeSession: (sftpSessionId: string) => void;
   /** Replace an existing session's ID in-place (used by sudo toggle). */
   swapSession: (oldId: string, newId: string, sudoMode: boolean) => void;
+  /** Route an `ssh:status` change to every explorer session riding on that SSH
+   *  connection (matched by `sshSessionId`). No-op if none match. */
+  setStatusBySsh: (sshSessionId: string, status: ConnectionStatus, message?: string) => void;
   setActiveSftpSession: (id: string | null) => void;
   setEntries: (sftpSessionId: string, path: string, entries: ExplorerEntry[]) => void;
   setLoading: (sftpSessionId: string, loading: boolean) => void;
@@ -52,15 +63,17 @@ export const useSftpStore = create<SftpState>((set) => ({
   activeSftpSessionId: null,
   clipboard: null,
 
-  openSession: (sftpSessionId, sshSessionId, label, username, sudoMode, startDirectory) =>
+  openSession: (sftpSessionId, sshSessionId, label, username, sudoMode, startDirectory, hostId) =>
     set((state) => {
       const next = new Map(state.sessions);
       next.set(sftpSessionId, {
         sftpSessionId,
         sshSessionId,
+        hostId,
         label,
         username: username ?? "",
         sudoMode: sudoMode ?? false,
+        status: "Connected",
         currentPath: "/",
         startDirectory: startDirectory ?? "",
         entries: [],
@@ -100,6 +113,19 @@ export const useSftpStore = create<SftpState>((set) => ({
           ? { ...state.clipboard, sourceSessionId: newId }
           : state.clipboard;
       return { sessions: next, activeSftpSessionId: newActive, clipboard };
+    }),
+
+  setStatusBySsh: (sshSessionId, status, message) =>
+    set((state) => {
+      let changed = false;
+      const next = new Map(state.sessions);
+      for (const [id, session] of state.sessions) {
+        if (session.sshSessionId === sshSessionId) {
+          next.set(id, { ...session, status, statusMessage: message });
+          changed = true;
+        }
+      }
+      return changed ? { sessions: next } : state;
     }),
 
   setActiveSftpSession: (id) =>
