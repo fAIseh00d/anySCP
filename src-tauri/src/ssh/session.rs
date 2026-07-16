@@ -1,4 +1,4 @@
-use crate::types::{ConnectionStatus, SshError, SshOutputPayload, SshStatusPayload};
+use crate::types::{ConnectionStatus, HostConfig, SshError, SshOutputPayload, SshStatusPayload};
 use russh::client::Handle;
 use russh::ChannelMsg;
 use std::sync::Arc;
@@ -23,19 +23,16 @@ enum SessionCmd {
 /// The underlying `Handle` is stored in an `Arc<Mutex<>>` so that the SFTP
 /// layer can open additional channels on the same connection without taking
 /// ownership and without cloning (which `Handle` does not support).
-/// Minimal config needed to open additional channels on the same connection.
-#[derive(Clone)]
-pub struct SplitConfig {
-    pub default_shell: Option<String>,
-}
-
 pub struct SshSession {
     handle: Arc<Mutex<Handle<SshClientHandler>>>,
     cmd_tx: mpsc::UnboundedSender<SessionCmd>,
     reader_task: tokio::task::JoinHandle<()>,
     #[allow(dead_code)]
     session_id: String,
-    split_config: SplitConfig,
+    /// The full connection config this session was dialed with (credentials
+    /// already resolved from the keychain at connect time). Kept so the session
+    /// can be re-dialed in place (reconnect) and so splits inherit the shell.
+    host_config: HostConfig,
     /// When this session is reached through a ProxyJump chain, the jump-host
     /// handles (one per hop) are held here so the tunnel underneath stays open
     /// for the session's lifetime. Shared via `Arc` so split panes on the same
@@ -48,9 +45,8 @@ pub struct SshSession {
 
 impl SshSession {
     /// Open a PTY channel on an authenticated connection, start the output
-    /// reader loop, and return the session wrapper.
-    // ProxyJump support added `jump_handles`, pushing this one over the 7-arg lint.
-    #[allow(clippy::too_many_arguments)]
+    /// reader loop, and return the session wrapper. `config` is the connection
+    /// config the handle was dialed with; the session keeps it for reconnect.
     pub async fn open_pty(
         handle: Handle<SshClientHandler>,
         jump_handles: Arc<Vec<Handle<SshClientHandler>>>,
@@ -58,9 +54,10 @@ impl SshSession {
         cols: u32,
         rows: u32,
         app_handle: AppHandle,
-        default_shell: Option<String>,
-        startup_command: Option<String>,
+        config: HostConfig,
     ) -> Result<Self, SshError> {
+        let default_shell = config.default_shell.clone();
+        let startup_command = config.startup_command.clone();
         // Wrap the handle immediately so it can be shared with SFTP later.
         let handle = Arc::new(Mutex::new(handle));
 
@@ -174,14 +171,15 @@ impl SshSession {
             cmd_tx,
             reader_task,
             session_id,
-            split_config: SplitConfig { default_shell },
+            host_config: config,
             jump_handles,
         })
     }
 
     /// Open a new PTY channel on the same authenticated connection.
-    /// Used for split panes — avoids re-authentication.
-    #[allow(clippy::too_many_arguments)]
+    /// Used for split panes — avoids re-authentication. The parent's `config`
+    /// is inherited so the split uses the same shell and can itself reconnect;
+    /// its `startup_command` is intentionally NOT re-run for splits.
     pub async fn open_split_pty(
         handle: Arc<Mutex<Handle<SshClientHandler>>>,
         jump_handles: Arc<Vec<Handle<SshClientHandler>>>,
@@ -189,8 +187,9 @@ impl SshSession {
         cols: u32,
         rows: u32,
         app_handle: AppHandle,
-        default_shell: Option<String>,
+        config: HostConfig,
     ) -> Result<Self, SshError> {
+        let default_shell = config.default_shell.clone();
         let channel = handle
             .lock()
             .await
@@ -284,7 +283,7 @@ impl SshSession {
             cmd_tx,
             reader_task,
             session_id,
-            split_config: SplitConfig { default_shell },
+            host_config: config,
             // Share the parent's ProxyJump tunnel chain so it stays alive for as
             // long as this split pane lives, independent of the parent session.
             jump_handles,
@@ -303,9 +302,10 @@ impl SshSession {
         self.jump_handles.clone()
     }
 
-    /// Return the config needed to open additional split channels.
-    pub fn host_config(&self) -> SplitConfig {
-        self.split_config.clone()
+    /// Return the connection config this session was dialed with — used to open
+    /// split channels with the same shell, and to re-dial on reconnect.
+    pub fn host_config(&self) -> HostConfig {
+        self.host_config.clone()
     }
 
     /// Write raw bytes into the PTY channel (user keystrokes).

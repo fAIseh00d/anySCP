@@ -103,6 +103,26 @@ impl SshManager {
         }
     }
 
+    /// The russh client config every connection (PTY, no-PTY, reconnect) uses.
+    ///
+    /// Keepalive does double duty: probes prevent server idle-timeout drops
+    /// (and keep any ProxyJump tunnel beneath an idle session alive), while
+    /// `keepalive_max` unanswered probes let russh detect a genuinely dead
+    /// peer — which the reconnect UI depends on. `inactivity_timeout` stays
+    /// off: it would tear down quiet-but-healthy sessions instead.
+    fn build_russh_config(config: &HostConfig) -> Arc<client::Config> {
+        let keepalive_secs = config
+            .keep_alive_interval
+            .map_or(DEFAULT_KEEPALIVE_SECS, u64::from);
+        Arc::new(client::Config {
+            inactivity_timeout: None,
+            keepalive_interval: (keepalive_secs > 0)
+                .then(|| std::time::Duration::from_secs(keepalive_secs)),
+            keepalive_max: KEEPALIVE_MAX,
+            ..Default::default()
+        })
+    }
+
     /// Establish a new SSH connection and return its SessionId.
     pub async fn connect(
         &self,
@@ -127,21 +147,7 @@ impl SshManager {
             },
         );
 
-        let keepalive_secs = config
-            .keep_alive_interval
-            .map_or(DEFAULT_KEEPALIVE_SECS, u64::from);
-        let russh_config = Arc::new(client::Config {
-            // Send SSH keepalive probes rather than arming an inactivity GC timer.
-            // `inactivity_timeout` only tears the session down after a quiet
-            // window (and sends nothing to prevent it), which would also collapse
-            // any ProxyJump tunnel beneath an idle session. `keepalive_interval`
-            // proactively keeps the connection — and the tunnel — alive, while
-            // `keepalive_max` unanswered probes still detect a genuinely dead peer.
-            keepalive_interval: (keepalive_secs > 0)
-                .then(|| std::time::Duration::from_secs(keepalive_secs)),
-            keepalive_max: KEEPALIVE_MAX,
-            ..Default::default()
-        });
+        let russh_config = Self::build_russh_config(&config);
 
         // Establish the connection — directly or tunnelled through a ProxyJump
         // chain. The jump handles must outlive the target session, so they are
@@ -165,8 +171,7 @@ impl SshManager {
                 80,
                 24,
                 app_handle,
-                config.default_shell.clone(),
-                config.startup_command.clone(),
+                config.clone(),
             )
             .await
         };
@@ -206,19 +211,7 @@ impl SshManager {
             .as_ref()
             .map(|id| self.register_pending(id.clone()));
 
-        // Keepalive here does double duty: it prevents server idle-timeout drops
-        // (SFTP sessions can sit idle for a long time) AND lets russh detect a
-        // genuinely dead peer, which the explorer's reconnect overlay relies on.
-        let keepalive_secs = config
-            .keep_alive_interval
-            .map_or(DEFAULT_KEEPALIVE_SECS, u64::from);
-        let russh_config = Arc::new(client::Config {
-            inactivity_timeout: None,
-            keepalive_interval: (keepalive_secs > 0)
-                .then(|| std::time::Duration::from_secs(keepalive_secs)),
-            keepalive_max: KEEPALIVE_MAX,
-            ..Default::default()
-        });
+        let russh_config = Self::build_russh_config(&config);
 
         // Establish the connection — directly or tunnelled through a ProxyJump —
         // racing against the cancellation token so the user can abort mid-handshake.
@@ -478,7 +471,7 @@ impl SshManager {
             80,
             24,
             app_handle,
-            host_config.default_shell,
+            host_config,
         )
         .await?;
 
