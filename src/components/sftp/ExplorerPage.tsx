@@ -7,7 +7,9 @@ import { createLocalProvider } from "../../providers/local-provider";
 import { useSftpStore } from "../../stores/sftp-store";
 import { useS3Store } from "../../stores/s3-store";
 import { useSettingsStore } from "../../stores/settings-store";
+import { WorkspaceArea } from "../workspace/WorkspaceArea";
 import type { Transport } from "../../lib/explorer-transport";
+import type { LayoutNode, PaneContent } from "../../types";
 
 interface ExplorerPageProps {
   /** SFTP/SCP transport session id (both live in the sftp store). */
@@ -21,9 +23,10 @@ interface ExplorerPageProps {
 }
 
 /**
- * A bordered explorer pane (header + content) — used for the single view and
- * for each side of dual-pane. In dual-pane it shows an accent border when it's
- * the focused pane; a mousedown anywhere in it makes it focused.
+ * A bordered explorer pane (header + content) — the explorer's equivalent of
+ * TerminalPane, rendered by WorkspaceArea for each leaf. Fills via `h-full`
+ * (not flex-1) so it works inside a split child, which is a plain block. In
+ * dual-pane it shows an accent border when focused; a mousedown focuses it.
  */
 function ExplorerPane({
   icon: Icon,
@@ -44,7 +47,7 @@ function ExplorerPane({
     <div
       onMouseDownCapture={onActivate}
       className={[
-        "flex flex-col flex-1 min-h-0 rounded-lg overflow-hidden border transition-colors duration-[var(--duration-fast)]",
+        "flex flex-col h-full min-h-0 rounded-lg overflow-hidden border transition-colors duration-[var(--duration-fast)]",
         highlighted ? "border-accent/50" : "border-border/60",
       ].join(" ")}
     >
@@ -71,8 +74,6 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
   // Surface SCP fallback subtly so the user understands why server-side
   // metadata (timestamps, etc.) may look slightly different.
   const label = sftpSessionId && transport === "scp" ? `${baseLabel} · SCP` : baseLabel;
-  const isSftp = !!sftpSessionId;
-  const Icon = isSftp ? FolderOpen : Cloud;
 
   const sftpProvider = useMemo(
     () => (sftpSessionId ? createSftpProvider(sftpSessionId, transport) : null),
@@ -82,47 +83,72 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
   // Left pane = local filesystem (WinSCP-style), scoped per tab so each keeps
   // its own cwd. Only created when dual-pane is on.
   const remoteId = sftpSessionId ?? s3SessionId ?? "";
+  const localKey = `local:${remoteId}`;
   const localProvider = useMemo(
-    () => (dualPane ? createLocalProvider(`local:${remoteId}`) : null),
-    [dualPane, remoteId],
+    () => (dualPane ? createLocalProvider(localKey) : null),
+    [dualPane, localKey],
   );
 
-  // Which pane has focus. Only the focused pane is "active" (its document-level
-  // listeners fire), so the two panes don't fight over keyboard shortcuts.
-  const [focused, setFocused] = useState<"local" | "remote">("remote");
-  const remoteActive = isActive && (!dualPane || focused === "remote");
+  // Divider position + which pane is focused. Only the focused pane is "active"
+  // (its document-level listeners fire), so the two don't fight over shortcuts.
+  const [ratio, setRatio] = useState(0.5);
+  const [focusedId, setFocusedId] = useState(remoteId);
 
-  const remotePane = (
-    <ExplorerPane
-      icon={Icon}
-      label={label}
-      transport={sftpSessionId ? transport : s3SessionId ? "s3" : undefined}
-      highlighted={dualPane && focused === "remote"}
-      onActivate={() => setFocused("remote")}
-    >
-      {sftpSessionId && sftpProvider && <Explorer provider={sftpProvider} isActive={remoteActive} />}
-      {s3SessionId && <S3Explorer sessionId={s3SessionId} isActive={remoteActive} />}
-    </ExplorerPane>
-  );
+  const remoteContent: PaneContent = sftpSessionId
+    ? { kind: "sftp", sessionId: sftpSessionId, transport }
+    : { kind: "s3", sessionId: s3SessionId ?? "" };
+
+  // Dual-pane is just a horizontal split of [local, remote]; single is one pane.
+  const layout: LayoutNode = dualPane
+    ? {
+        type: "split",
+        direction: "horizontal",
+        ratio,
+        children: [
+          { type: "pane", content: { kind: "local", sessionId: localKey } },
+          { type: "pane", content: remoteContent },
+        ],
+      }
+    : { type: "pane", content: remoteContent };
+
+  const renderPane = (content: PaneContent) => {
+    const paneActive = isActive && (!dualPane || content.sessionId === focusedId);
+    const highlighted = dualPane && content.sessionId === focusedId;
+    const onActivate = () => setFocusedId(content.sessionId);
+
+    if (content.kind === "local") {
+      return (
+        <ExplorerPane icon={HardDrive} label="Local" transport="local" highlighted={highlighted} onActivate={onActivate}>
+          {localProvider && <Explorer provider={localProvider} isActive={paneActive} />}
+        </ExplorerPane>
+      );
+    }
+    if (content.kind === "s3") {
+      return (
+        <ExplorerPane icon={Cloud} label={label} transport="s3" highlighted={highlighted} onActivate={onActivate}>
+          <S3Explorer sessionId={content.sessionId} isActive={paneActive} />
+        </ExplorerPane>
+      );
+    }
+    if (content.kind === "sftp") {
+      return (
+        <ExplorerPane icon={FolderOpen} label={label} transport={content.transport} highlighted={highlighted} onActivate={onActivate}>
+          {sftpProvider && <Explorer provider={sftpProvider} isActive={paneActive} />}
+        </ExplorerPane>
+      );
+    }
+    return null; // terminal panes never occur in an explorer tab
+  };
 
   return (
     <div className="flex flex-col h-full p-2">
-      {dualPane && localProvider ? (
-        <div className="flex flex-1 min-h-0 gap-2">
-          <ExplorerPane
-            icon={HardDrive}
-            label="Local"
-            transport="local"
-            highlighted={focused === "local"}
-            onActivate={() => setFocused("local")}
-          >
-            <Explorer provider={localProvider} isActive={isActive && focused === "local"} />
-          </ExplorerPane>
-          {remotePane}
-        </div>
-      ) : (
-        remotePane
-      )}
+      <WorkspaceArea
+        node={layout}
+        tabId={remoteId}
+        zoomed={false}
+        setRatio={(_tabId, _path, r) => setRatio(r)}
+        renderPane={renderPane}
+      />
     </div>
   );
 }
