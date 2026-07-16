@@ -120,7 +120,7 @@ export function HistoryPage() {
         label: entry.host_label || undefined,
         auth_method: { type: "password", password: "" },
       });
-      useTabStore.getState().addTab({ type: "terminal", id: sessionId, label });
+      useTabStore.getState().addTab({ type: "terminal", id: sessionId, label, hostId: entry.host_id });
     } catch {
       // Connection errors show via disconnect overlay
     }
@@ -153,7 +153,7 @@ export function HistoryPage() {
       }
 
       useSftpStore.getState().openSession(explorerSessionId, sessionId, label, entry.username);
-      useTabStore.getState().addTab({ type: "sftp", id: explorerSessionId, label, transport });
+      useTabStore.getState().addTab({ type: "sftp", id: explorerSessionId, label, transport, hostId: entry.host_id });
     } catch {
       // Errors surface via SFTP page
     }

@@ -8,8 +8,12 @@ import { useS3Store } from "./s3-store";
 export type PageId = "hosts" | "snippets" | "port-forwarding" | "history" | "settings";
 
 export type UnifiedTab =
-  | { type: "terminal"; id: string; label: string }
-  | { type: "sftp"; id: string; label: string; transport?: "sftp" | "scp" }
+  // `hostId` is the saved-host id this session was dialed from — kept so the tab
+  // can be re-dialed after a restart/crash (reconnect-on-focus). Ad-hoc sessions
+  // (quick-connect, no saved host) have none and aren't restored. s3 needs none:
+  // its tab id IS the persistent connection id.
+  | { type: "terminal"; id: string; label: string; hostId?: string }
+  | { type: "sftp"; id: string; label: string; transport?: "sftp" | "scp"; hostId?: string }
   | { type: "s3"; id: string; label: string }
   | { type: "page"; id: string; label: string; page: PageId };
 
@@ -141,6 +145,61 @@ export const useTabStore = create<TabState>((set, get) => ({
     return false;
   },
 }));
+
+// ─── Persistence ──────────────────────────────────────────────────────────────
+// The open-tab list is written to app_settings on every change and rehydrated on
+// launch, so tabs survive a restart/crash. Only saved-host-backed connection
+// tabs can be re-dialed (reconnect-on-focus), so ad-hoc sessions and their
+// transient ids are omitted; s3 persists by its stable connection id.
+
+/** Serialized form of a restorable tab (a discriminated subset of UnifiedTab). */
+export interface PersistedTab {
+  kind: UnifiedTab["type"];
+  id: string;
+  label: string;
+  page?: PageId;
+  transport?: "sftp" | "scp";
+  hostId?: string;
+}
+
+export interface PersistedTabs {
+  activeTabId: string | null;
+  tabs: PersistedTab[];
+}
+
+export const OPEN_TABS_KEY = "open_tabs";
+
+function serializeTabs(state: TabState): PersistedTabs {
+  const tabs: PersistedTab[] = [];
+  for (const id of state.tabOrder) {
+    const t = state.tabs.get(id);
+    if (!t) continue;
+    if (t.type === "page") tabs.push({ kind: "page", id: t.id, label: t.label, page: t.page });
+    else if (t.type === "s3") tabs.push({ kind: "s3", id: t.id, label: t.label });
+    else if (t.type === "sftp" && t.hostId)
+      tabs.push({ kind: "sftp", id: t.id, label: t.label, transport: t.transport, hostId: t.hostId });
+    else if (t.type === "terminal" && t.hostId)
+      tabs.push({ kind: "terminal", id: t.id, label: t.label, hostId: t.hostId });
+  }
+  return { activeTabId: state.activeTabId, tabs };
+}
+
+// Debounced so a burst of changes (e.g. opening several tabs) writes once.
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+function schedulePersist() {
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    const value = JSON.stringify(serializeTabs(useTabStore.getState()));
+    void (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("save_setting", { key: OPEN_TABS_KEY, value });
+      } catch { /* best-effort */ }
+    })();
+  }, 150);
+}
+
+useTabStore.subscribe(schedulePersist);
 
 // ─── Domain store sync ──────────────────────────────────────────────────────
 

@@ -246,7 +246,7 @@ export function HostsDashboard() {
         });
         void useHostsStore.getState().recordConnection(host.id);
         setConnectingHost(null);
-        useTabStore.getState().addTab({ type: "terminal", id: sessionId, label: hostLabel });
+        useTabStore.getState().addTab({ type: "terminal", id: sessionId, label: hostLabel, hostId: host.id });
       } catch (err) {
         if (cancelled) return;
         const msg = err && typeof err === "object" && "message" in err
@@ -287,7 +287,7 @@ export function HostsDashboard() {
         });
         void useHostsStore.getState().recordConnection(conn.host_id);
         setConnectingHost(null);
-        useTabStore.getState().addTab({ type: "terminal", id: sessionId, label: connLabel });
+        useTabStore.getState().addTab({ type: "terminal", id: sessionId, label: connLabel, hostId: conn.host_id });
       } catch (err) {
         if (cancelled) return;
         const msg = err && typeof err === "object" && "message" in err
@@ -353,7 +353,7 @@ export function HostsDashboard() {
         useSftpStore.getState().openSession(explorerSessionId, sessionId, label, host.username, false, host.start_directory ?? undefined);
 
         setConnectingHost(null);
-        useTabStore.getState().addTab({ type: "sftp", id: explorerSessionId, label, transport });
+        useTabStore.getState().addTab({ type: "sftp", id: explorerSessionId, label, transport, hostId: host.id });
       } catch (err) {
         if (cancelled) return;
         const msg = err && typeof err === "object" && "message" in err
