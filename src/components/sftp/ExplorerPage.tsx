@@ -8,6 +8,7 @@ import { useSftpStore } from "../../stores/sftp-store";
 import { useS3Store } from "../../stores/s3-store";
 import { useSettingsStore } from "../../stores/settings-store";
 import { WorkspaceArea } from "../workspace/WorkspaceArea";
+import { ExplorerReconnectOverlay } from "./ExplorerReconnectOverlay";
 import type { Transport } from "../../lib/explorer-transport";
 import type { ConnectionStatus, LayoutNode, PaneContent } from "../../types";
 
@@ -51,6 +52,7 @@ function ExplorerPane({
   highlighted,
   onActivate,
   children,
+  overlay,
 }: {
   icon: React.ElementType;
   label: string;
@@ -59,6 +61,8 @@ function ExplorerPane({
   highlighted: boolean;
   onActivate: () => void;
   children: React.ReactNode;
+  /** Optional pane-anchored overlay (e.g. the reconnect toast). */
+  overlay?: React.ReactNode;
 }) {
   return (
     <div
@@ -75,8 +79,9 @@ function ExplorerPane({
           {label}
         </span>
       </div>
-      <div className="flex-1 min-h-0 bg-bg-base" data-explorer-transport={transport}>
+      <div className="relative flex-1 min-h-0 bg-bg-base" data-explorer-transport={transport}>
         {children}
+        {overlay}
       </div>
     </div>
   );
@@ -148,8 +153,17 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
       );
     }
     if (content.kind === "sftp") {
+      const dropped = sftpSession?.status === "Disconnected" || sftpSession?.status === "Error";
       return (
-        <ExplorerPane icon={FolderOpen} label={label} transport={content.transport} status={sftpSession?.status} highlighted={highlighted} onActivate={onActivate}>
+        <ExplorerPane
+          icon={FolderOpen}
+          label={label}
+          transport={content.transport}
+          status={sftpSession?.status}
+          highlighted={highlighted}
+          onActivate={onActivate}
+          overlay={dropped && <ExplorerReconnectOverlay sftpSessionId={content.sessionId} tabId={content.sessionId} />}
+        >
           {sftpProvider && <Explorer provider={sftpProvider} isActive={paneActive} />}
         </ExplorerPane>
       );
