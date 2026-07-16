@@ -71,7 +71,7 @@ export function TerminalPane({ sessionId, tabId }: { sessionId: string; tabId: s
 
 export function TerminalArea({ node, path = [], tabId }: TerminalAreaProps) {
   if (node.type === "pane") {
-    return <TerminalPane sessionId={node.sessionId} tabId={tabId} />;
+    return <TerminalPane sessionId={node.content.sessionId} tabId={tabId} />;
   }
 
   return <SplitContainer node={node} path={path} tabId={tabId} />;

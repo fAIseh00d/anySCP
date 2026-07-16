@@ -336,7 +336,7 @@ export function UnifiedTabBar() {
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function collectLayoutIds(node: import("../../types").LayoutNode): string[] {
-  if (node.type === "pane") return [node.sessionId];
+  if (node.type === "pane") return [node.content.sessionId];
   return [...collectLayoutIds(node.children[0]), ...collectLayoutIds(node.children[1])];
 }
 
@@ -345,5 +345,5 @@ function getFirstSessionIdFromTab(tabId: string): string | null {
   if (!tab) return null;
   let node = tab.layout;
   while (node.type === "split") node = node.children[0];
-  return node.sessionId;
+  return node.content.sessionId;
 }
