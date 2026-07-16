@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { HostConfig, SessionId } from "../../types";
 import { useSessionStore } from "../../stores/session-store";
 import { useTabStore } from "../../stores/tab-store";
+import { getTerminal } from "../../stores/terminal-instances";
 import { ReconnectOverlay } from "../shared/ReconnectOverlay";
 
 interface DisconnectOverlayProps {
@@ -29,26 +30,20 @@ export function DisconnectOverlay({
     try {
       const { invoke } = await import("@tauri-apps/api/core");
 
-      // Try to find a saved host matching this connection — use connect_saved_host
-      // which reads credentials from the OS keychain
-      const hosts = await invoke<{ id: string; host: string; port: number; username: string }[]>("list_hosts");
-      const savedHost = hosts.find(
-        (h) => h.host === hostConfig.host && h.port === hostConfig.port && h.username === hostConfig.username,
-      );
+      // Recovery, not replacement: the backend re-dials the session's stored
+      // config and swaps the transport under the SAME session id. The tab,
+      // pane, and xterm buffer (scrollback) all survive; `ssh:status`
+      // Connecting → Connected on this id hides the overlay.
+      await invoke("ssh_reconnect", { sessionId });
 
-      let newSessionId: string;
-      if (savedHost) {
-        newSessionId = await invoke<string>("connect_saved_host", { hostId: savedHost.id });
-      } else {
-        newSessionId = await invoke<string>("ssh_connect", { hostConfig });
+      // Mark the seam in the (preserved) scrollback, then bring the fresh
+      // 80×24 PTY up to the pane's real size.
+      const entry = getTerminal(sessionId);
+      if (entry) {
+        entry.term.writeln("\r\n\x1b[2m— reconnected —\x1b[0m");
+        await invoke("ssh_resize_pty", { sessionId, cols: entry.term.cols, rows: entry.term.rows });
       }
-
-      const { removeSession, addSession } = useSessionStore.getState();
-      const label = hostConfig.label || `${hostConfig.username}@${hostConfig.host}`;
-      useTabStore.getState().removeTab(sessionId);
-      removeSession(sessionId);
-      addSession(newSessionId as SessionId, hostConfig);
-      useTabStore.getState().addTab({ type: "terminal", id: newSessionId, label });
+      setIsReconnecting(false);
     } catch (err) {
       const msg =
         err instanceof Error ? err.message
