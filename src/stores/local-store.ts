@@ -42,12 +42,14 @@ function patch(panes: Map<string, LocalPane>, key: string, p: Partial<LocalPane>
 
 export const useLocalStore = create<LocalState>((set) => ({
   panes: new Map(),
+  // Like the sftp/s3 stores, a completed listing (or an error) also clears
+  // `loading` — loadDirectory relies on that instead of a separate setLoading.
   setEntries: (paneKey, path, entries) =>
-    set((s) => ({ panes: patch(s.panes, paneKey, { currentPath: path, entries }) })),
+    set((s) => ({ panes: patch(s.panes, paneKey, { currentPath: path, entries, loading: false, error: null }) })),
   setLoading: (paneKey, loading) =>
     set((s) => ({ panes: patch(s.panes, paneKey, { loading }) })),
   setError: (paneKey, error) =>
-    set((s) => ({ panes: patch(s.panes, paneKey, { error }) })),
+    set((s) => ({ panes: patch(s.panes, paneKey, { error, loading: false }) })),
   setSort: (paneKey, sortBy, sortAsc) =>
     set((s) => ({ panes: patch(s.panes, paneKey, { sortBy, sortAsc }) })),
   closePane: (paneKey) =>
