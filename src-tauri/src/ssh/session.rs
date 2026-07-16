@@ -4,6 +4,7 @@ use russh::ChannelMsg;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, Mutex};
+use tracing::warn;
 
 use super::handler::SshClientHandler;
 
@@ -130,6 +131,7 @@ impl SshSession {
                                 let _ = reader_app.emit("ssh:output", &payload);
                             }
                             Some(ChannelMsg::Eof | ChannelMsg::Close) | None => {
+                                warn!(session_id = %reader_session_id, "SSH connection lost (channel closed)");
                                 let status_payload = SshStatusPayload {
                                     session_id: reader_session_id.clone(),
                                     status: ConnectionStatus::Disconnected,
@@ -239,6 +241,7 @@ impl SshSession {
                                 let _ = reader_app.emit("ssh:output", &payload);
                             }
                             Some(ChannelMsg::Eof | ChannelMsg::Close) | None => {
+                                warn!(session_id = %reader_session_id, "SSH connection lost (channel closed)");
                                 let status_payload = SshStatusPayload {
                                     session_id: reader_session_id.clone(),
                                     status: ConnectionStatus::Disconnected,

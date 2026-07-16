@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::handler::SshClientHandler;
 use super::session::SshSession;
@@ -255,6 +255,7 @@ impl SshManager {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(BARE_MONITOR_POLL_SECS)).await;
                     if handle.lock().await.is_closed() {
+                        warn!(session_id = %monitored_sid, "SSH connection lost (no PTY / SFTP; peer stopped answering keepalives)");
                         let _ = app.emit(
                             "ssh:status",
                             &SshStatusPayload {
