@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio::task;
 use tracing::instrument;
 
@@ -144,6 +144,7 @@ pub async fn pf_start_tunnel(
     local_port: u32,
     remote_host: String,
     remote_port: u32,
+    app_handle: AppHandle,
     pf_manager: State<'_, Arc<PortForwardManager>>,
     ssh_manager: State<'_, SshManager>,
     db: State<'_, Arc<HostDb>>,
@@ -212,7 +213,7 @@ pub async fn pf_start_tunnel(
         jump_host: None,
     };
 
-    let session_id = ssh_manager.connect_no_pty(config, None).await?;
+    let session_id = ssh_manager.connect_no_pty(config, app_handle, None).await?;
     let handle = ssh_manager.get_handle(&session_id.0)?;
 
     // Record last_used_at

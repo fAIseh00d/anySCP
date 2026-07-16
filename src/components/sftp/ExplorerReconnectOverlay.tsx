@@ -72,6 +72,11 @@ export function ExplorerReconnectOverlay({ sftpSessionId, tabId }: ExplorerRecon
         }
       }
 
+      // Tear the dead session down so its bare handle + sftp wrapper don't leak
+      // in the backend maps (best-effort — the peer is already gone).
+      void invoke("sftp_close", { sftpSessionId }).catch(() => {});
+      void invoke("ssh_disconnect", { sessionId: s.sshSessionId }).catch(() => {});
+
       // Swap in the fresh session + tab (both keyed by the new id). This tab —
       // and this overlay — unmount as AppShell re-renders on the new tab id.
       useSftpStore.getState().closeSession(sftpSessionId);

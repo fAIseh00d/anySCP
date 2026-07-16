@@ -63,6 +63,10 @@ describe("ExplorerReconnectOverlay", () => {
     const tabs = useTabStore.getState().tabs;
     expect(tabs.has("sftp1")).toBe(false);
     expect(tabs.get("sftp2")).toMatchObject({ type: "sftp", transport: "sftp" });
+
+    // The dead session is torn down so it doesn't leak in the backend maps.
+    expect(invoke).toHaveBeenCalledWith("sftp_close", { sftpSessionId: "sftp1" });
+    expect(invoke).toHaveBeenCalledWith("ssh_disconnect", { sessionId: "ssh1" });
   });
 
   it("falls back to SCP when the SFTP subsystem is unavailable", async () => {

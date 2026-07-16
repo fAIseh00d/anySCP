@@ -666,6 +666,7 @@ fn build_host_config_blocking(
 pub async fn connect_saved_host_no_pty(
     host_id: String,
     attempt_id: Option<String>,
+    app_handle: AppHandle,
     state: State<'_, SshManager>,
     db: State<'_, Arc<HostDb>>,
 ) -> Result<SessionId, SshError> {
@@ -677,5 +678,5 @@ pub async fn connect_saved_host_no_pty(
     .await
     .map_err(|e| SshError::IoError(format!("task panicked: {e}")))??;
 
-    state.connect_no_pty(config, attempt_id).await
+    state.connect_no_pty(config, app_handle, attempt_id).await
 }

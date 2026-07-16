@@ -22,6 +22,13 @@ const DEFAULT_KEEPALIVE_SECS: u64 = 30;
 /// Unanswered keepalive probes before russh declares the peer dead.
 const KEEPALIVE_MAX: usize = 3;
 
+/// How often the bare-connection liveness monitor polls the handle. A no-PTY
+/// (SFTP/SCP) connection has no channel read loop to notice a dead peer, so this
+/// task watches `Handle::is_closed()` — which flips once russh's keepalive_max
+/// tears the session down — and emits `ssh:status` so the explorer's reconnect
+/// overlay fires, exactly like the terminal's channel EOF does.
+const BARE_MONITOR_POLL_SECS: u64 = 3;
+
 /// The target handle plus the chain of jump-host handles that must outlive it
 /// (deepest hop first, empty for a direct connection).
 type EstablishedConn = (
@@ -43,6 +50,9 @@ struct BareConn {
     /// open. They are never locked — merely keeping them alive prevents russh
     /// from tearing down the tunnel.
     _jump_handles: Vec<client::Handle<SshClientHandler>>,
+    /// Liveness-monitor task. Aborted on an explicit disconnect so it never
+    /// emits a spurious `Disconnected` for a connection the user closed.
+    monitor: tokio::task::AbortHandle,
 }
 
 /// Manages all active SSH sessions. Stored as Tauri managed state.
@@ -186,6 +196,7 @@ impl SshManager {
     pub async fn connect_no_pty(
         &self,
         config: HostConfig,
+        app_handle: AppHandle,
         attempt_id: Option<String>,
     ) -> Result<SessionId, SshError> {
         let session_id = SessionId::new();
@@ -229,11 +240,41 @@ impl SshManager {
 
         info!(session_id = %sid, host = %config.host, "SSH authenticated (no PTY, for SFTP)");
 
+        let handle = Arc::new(tokio::sync::Mutex::new(handle));
+
+        // Watch the connection for a silent death (VPN drop, cable pull). Unlike
+        // a PTY session, nothing here reads a channel, so we poll the handle and
+        // emit `Disconnected` once russh's keepalive declares the peer dead. The
+        // lock is held only for the cheap `is_closed()` check, so it never blocks
+        // SFTP channel opens.
+        let monitor = {
+            let handle = Arc::clone(&handle);
+            let app = app_handle.clone();
+            let monitored_sid = sid.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(BARE_MONITOR_POLL_SECS)).await;
+                    if handle.lock().await.is_closed() {
+                        let _ = app.emit(
+                            "ssh:status",
+                            &SshStatusPayload {
+                                session_id: monitored_sid.clone(),
+                                status: ConnectionStatus::Disconnected,
+                            },
+                        );
+                        break;
+                    }
+                }
+            })
+            .abort_handle()
+        };
+
         self.bare_handles.insert(
             sid.clone(),
             BareConn {
-                handle: Arc::new(tokio::sync::Mutex::new(handle)),
+                handle,
                 _jump_handles: jump_handles,
+                monitor,
             },
         );
 
@@ -483,6 +524,9 @@ impl SshManager {
         if let Some((_, session)) = self.sessions.remove(session_id) {
             session.disconnect().await?;
         } else if let Some((_, bare)) = self.bare_handles.remove(session_id) {
+            // Stop the liveness monitor first so it can't emit a Disconnected
+            // that races this user-initiated teardown.
+            bare.monitor.abort();
             // Best-effort goodbye — dropping the handles closes the connection
             // (and any ProxyJump tunnel beneath it) even if the server is gone.
             let _ = bare
