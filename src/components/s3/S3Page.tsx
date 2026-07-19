@@ -51,24 +51,12 @@ export function S3Page() {
   const handleDuplicate = async (conn: S3Connection) => {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      // Reconnect original to get credentials, then save a copy
-      // Simpler: just create a new DB entry (credentials won't be copied — user will need to re-enter)
-      await invoke("s3_connect", {
-        label: `${conn.label} (copy)`,
-        provider: conn.provider,
-        bucketName: conn.bucket ?? "",
-        region: conn.region,
-        endpoint: conn.endpoint,
-        accessKey: "", // Will need credentials on reconnect
-        secretKey: "",
-        pathStyle: conn.path_style,
-        color: conn.color,
-        environment: conn.environment,
-        notes: conn.notes,
-      });
+      // Backend copies the DB row AND the keychain credential under a new id —
+      // the frontend can't read the source secret, so the old path left the
+      // copy with empty creds and every list failed to authenticate.
+      await invoke("s3_duplicate_connection", { id: conn.id });
       await loadSavedConnections();
     } catch {
-      // If it fails because of empty credentials, the connection is still saved to DB
       await loadSavedConnections();
     }
   };

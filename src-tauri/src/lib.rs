@@ -293,6 +293,7 @@ pub fn run() {
             s3::commands::s3_list_connections,
             s3::commands::reorder_s3_connections,
             s3::commands::s3_delete_connection,
+            s3::commands::s3_duplicate_connection,
             s3::commands::s3_reconnect,
             s3::commands::s3_update_connection,
             s3::commands::s3_create_file,

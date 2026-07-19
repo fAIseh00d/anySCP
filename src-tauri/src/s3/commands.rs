@@ -229,6 +229,76 @@ pub async fn s3_update_connection(
     Ok(())
 }
 
+/// Duplicate a saved connection: copy its DB row AND its keychain credential
+/// under a fresh id. The credential copy is why this must be a backend command
+/// — the frontend can't read the source secret out of the keychain, so its
+/// old duplicate path left the copy with empty credentials (every list then
+/// failed to authenticate). Returns the new connection's id.
+#[tauri::command]
+#[instrument(skip(db))]
+pub async fn s3_duplicate_connection(
+    id: String,
+    db: State<'_, Arc<HostDb>>,
+) -> Result<String, S3Error> {
+    let db_list = Arc::clone(&db);
+    let source_id = id.clone();
+    let connections = tokio::task::spawn_blocking(move || db_list.list_s3_connections())
+        .await
+        .map_err(|e| S3Error::IoError(format!("task panicked: {e}")))?
+        .map_err(|e| S3Error::OperationError(e.to_string()))?;
+    let source = connections
+        .into_iter()
+        .find(|c| c.id == source_id)
+        .ok_or_else(|| S3Error::SessionNotFound(source_id.clone()))?;
+
+    let new_id = uuid::Uuid::new_v4().to_string();
+
+    let db_save = Arc::clone(&db);
+    let row = source.clone();
+    let nid = new_id.clone();
+    tokio::task::spawn_blocking(move || {
+        db_save.save_s3_connection(
+            &nid,
+            &format!("{} (copy)", row.label),
+            &row.provider,
+            &row.region,
+            row.endpoint.as_deref(),
+            row.bucket.as_deref(),
+            row.path_style,
+            row.group_id.as_deref(),
+            row.color.as_deref(),
+            row.environment.as_deref(),
+            row.notes.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| S3Error::IoError(format!("task panicked: {e}")))?
+    .map_err(|e| S3Error::OperationError(e.to_string()))?;
+
+    // Copy the credential too — best-effort: a source without a stored secret
+    // (e.g. one saved before creds were entered) just yields a copy the user
+    // must fill in, rather than failing the duplication.
+    let from_key = format!("s3:{id}");
+    let to_key = format!("s3:{new_id}");
+    let copied = tokio::task::spawn_blocking(move || {
+        match crate::vault::get_credential(&from_key) {
+            Ok(cred) => crate::vault::save_credential(&to_key, &cred),
+            // Source never had a stored secret — a credless copy is expected,
+            // not an error; the user just fills it in.
+            Err(crate::vault::VaultError::NotFound(_)) => Ok(()),
+            Err(e) => Err(e),
+        }
+    })
+    .await;
+    if let Ok(Err(e)) = copied {
+        // A real keychain error — the copy exists in the DB but without a secret
+        // the user must re-enter. Surface why rather than leaving it silent.
+        tracing::warn!(source = %id, new = %new_id, error = %e, "S3 duplicate has no credential (copy failed)");
+    }
+
+    Ok(new_id)
+}
+
 #[tauri::command]
 #[instrument(skip(db))]
 pub async fn s3_list_connections(db: State<'_, Arc<HostDb>>) -> Result<Vec<S3Connection>, S3Error> {
@@ -266,13 +336,24 @@ pub async fn s3_delete_connection(
 ) -> Result<(), S3Error> {
     s3_manager.disconnect(&id);
 
+    // A failed DB delete is a real failure — don't report success for it.
     let db = Arc::clone(&db);
     let id_clone = id.clone();
-    let _ = tokio::task::spawn_blocking(move || db.delete_s3_connection(&id_clone)).await;
+    tokio::task::spawn_blocking(move || db.delete_s3_connection(&id_clone))
+        .await
+        .map_err(|e| S3Error::IoError(format!("task panicked: {e}")))?
+        .map_err(|e| S3Error::OperationError(e.to_string()))?;
 
-    // Remove vault credential
-    let vault_key = format!("s3:{}", id);
-    let _ = tokio::task::spawn_blocking(move || crate::vault::delete_credential(&vault_key)).await;
+    // Keychain cleanup is best-effort — a failure here (e.g. a denied macOS ACL
+    // prompt) must not block removing the connection, but log it so the stale
+    // entry is visible instead of silently orphaned. `delete_credential`
+    // already treats a missing entry as success.
+    let vault_key = format!("s3:{id}");
+    if let Ok(Err(e)) =
+        tokio::task::spawn_blocking(move || crate::vault::delete_credential(&vault_key)).await
+    {
+        tracing::warn!(id = %id, error = %e, "S3 credential left in keychain (delete failed)");
+    }
 
     crate::telemetry::capture("s3_connection_deleted", serde_json::json!({}));
     Ok(())
