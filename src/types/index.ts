@@ -51,9 +51,6 @@ export type {
 
 export type {
   SftpEntry,
-  SftpClipboard,
-  TransferProgress,
-  TransferStatus,
   TransferEvent,
   TransferStatusValue,
 } from "./sftp";
