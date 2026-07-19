@@ -88,21 +88,12 @@ export function HostsDashboard() {
   const handleS3Duplicate = async (conn: S3Connection) => {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("s3_save_connection", {
-        label: `${conn.label} (copy)`,
-        provider: conn.provider,
-        bucketName: conn.bucket ?? "",
-        region: conn.region,
-        endpoint: conn.endpoint,
-        accessKey: "",
-        secretKey: "",
-        pathStyle: conn.path_style,
-        groupId: conn.group_id,
-        color: conn.color,
-        environment: conn.environment,
-        notes: conn.notes,
-      });
-    } catch { /* credential-less copy saved to DB */ }
+      // Backend copies the DB row AND the keychain credential under a new id.
+      // The old path here wrote empty "" creds (the frontend can't read the
+      // source secret), so the copy connected unauthenticated and every list
+      // failed with `serde xml: missing field "Name"`.
+      await invoke("s3_duplicate_connection", { id: conn.id });
+    } catch { /* best-effort */ }
     await loadS3Connections();
   };
 
