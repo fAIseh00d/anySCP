@@ -351,6 +351,21 @@ export function Explorer({ provider, isActive = true }: ExplorerProps) {
     } catch { /* Upload errors surface in the transfer overlay */ }
   }, [startUpload]);
 
+  // Upload one or more whole folders. The picker is folder-only
+  // (`directory: true`), returning the selected folder paths themselves — the
+  // backend's enqueue_upload recreates each folder remotely and walks it
+  // recursively, so it goes through the same conflict/overwrite + queue path as
+  // file upload and drag-drop.
+  const handleUploadFolder = useCallback(async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selection = await open({ directory: true, multiple: true, title: "Upload folder" });
+      if (!selection) return;
+      const localPaths = Array.isArray(selection) ? selection : [selection];
+      await startUpload(localPaths, currentPathRef.current);
+    } catch { /* Upload errors surface in the transfer overlay */ }
+  }, [startUpload]);
+
   // ─── New folder/file (inline) ─────────────────────────────────────────────
 
   const [creatingFolder, setCreatingFolder] = useState(false);
@@ -517,6 +532,7 @@ export function Explorer({ provider, isActive = true }: ExplorerProps) {
         onNewFile={() => setCreatingFile(true)}
         onNewFolder={() => setCreatingFolder(true)}
         onUpload={() => void handleUpload()}
+        onUploadFolder={() => void handleUploadFolder()}
         busy={busy}
         sudoMode={sudoMode}
         sudoBusy={togglingSudo}
