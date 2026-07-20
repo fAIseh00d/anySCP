@@ -5,7 +5,7 @@ import { useS3Store } from "./s3-store";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type PageId = "hosts" | "snippets" | "port-forwarding" | "history" | "settings";
+export type PageId = "hosts" | "snippets" | "port-forwarding" | "history" | "settings" | "transfers";
 
 export type UnifiedTab =
   // `hostId` is the saved-host id this session was dialed from — kept so the tab
