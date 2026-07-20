@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useCallback } from "react";
 import type { HostConfig, SessionId } from "../../types";
 import { useSessionStore } from "../../stores/session-store";
 import { useTabStore } from "../../stores/tab-store";
 import { getTerminal } from "../../stores/terminal-instances";
+import { useSettingsStore } from "../../stores/settings-store";
+import { useAutoReconnect } from "../../hooks/use-auto-reconnect";
 import { ReconnectOverlay } from "../shared/ReconnectOverlay";
 
 interface DisconnectOverlayProps {
@@ -21,38 +23,25 @@ export function DisconnectOverlay({
   message,
   hostConfig,
 }: DisconnectOverlayProps) {
-  const [isReconnecting, setIsReconnecting] = useState(false);
-  const [reconnectError, setReconnectError] = useState<string | null>(null);
+  // Recovery, not replacement: the backend re-dials the session's stored config
+  // and swaps the transport under the SAME session id. The tab, pane, and xterm
+  // buffer (scrollback) all survive; `ssh:status` Connecting → Connected on this
+  // id hides the overlay. Must reject on failure so the auto-retry loop advances.
+  const reconnect = useCallback(async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("ssh_reconnect", { sessionId });
 
-  async function handleReconnect() {
-    setIsReconnecting(true);
-    setReconnectError(null);
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-
-      // Recovery, not replacement: the backend re-dials the session's stored
-      // config and swaps the transport under the SAME session id. The tab,
-      // pane, and xterm buffer (scrollback) all survive; `ssh:status`
-      // Connecting → Connected on this id hides the overlay.
-      await invoke("ssh_reconnect", { sessionId });
-
-      // Mark the seam in the (preserved) scrollback, then bring the fresh
-      // 80×24 PTY up to the pane's real size.
-      const entry = getTerminal(sessionId);
-      if (entry) {
-        entry.term.writeln("\r\n\x1b[2m— reconnected —\x1b[0m");
-        await invoke("ssh_resize_pty", { sessionId, cols: entry.term.cols, rows: entry.term.rows });
-      }
-      setIsReconnecting(false);
-    } catch (err) {
-      const msg =
-        err instanceof Error ? err.message
-        : err && typeof err === "object" && "message" in err ? String((err as { message: string }).message)
-        : "Reconnection failed";
-      setReconnectError(msg);
-      setIsReconnecting(false);
+    // Mark the seam in the (preserved) scrollback, then bring the fresh 80×24
+    // PTY up to the pane's real size.
+    const entry = getTerminal(sessionId);
+    if (entry) {
+      entry.term.writeln("\r\n\x1b[2m— reconnected —\x1b[0m");
+      await invoke("ssh_resize_pty", { sessionId, cols: entry.term.cols, rows: entry.term.rows });
     }
-  }
+  }, [sessionId]);
+
+  const autoReconnect = useSettingsStore((s) => s.autoReconnect);
+  const auto = useAutoReconnect(reconnect, { enabled: autoReconnect });
 
   function handleClose() {
     void (async () => {
@@ -80,10 +69,11 @@ export function DisconnectOverlay({
       label={`${hostConfig.username}@${hostConfig.host}`}
       status={status}
       message={message}
-      error={reconnectError}
-      busy={isReconnecting}
-      onReconnect={handleReconnect}
+      error={auto.error}
+      busy={auto.busy}
+      onReconnect={auto.retry}
       onClose={handleClose}
+      busyLabel={auto.busyLabel}
     />
   );
 }

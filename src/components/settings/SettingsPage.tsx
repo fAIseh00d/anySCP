@@ -564,6 +564,8 @@ function TerminalSettings() {
   const setFontFamily = useSettingsStore((s) => s.setTerminalFontFamily);
   const copyOnSelect = useSettingsStore((s) => s.terminalCopyOnSelect);
   const setCopyOnSelect = useSettingsStore((s) => s.setTerminalCopyOnSelect);
+  const autoReconnect = useSettingsStore((s) => s.autoReconnect);
+  const setAutoReconnect = useSettingsStore((s) => s.setAutoReconnect);
   const pasteButton = useSettingsStore((s) => s.terminalPasteButton);
   const setPasteButton = useSettingsStore((s) => s.setTerminalPasteButton);
 
@@ -670,6 +672,16 @@ function TerminalSettings() {
         <p className="px-1 text-[length:var(--text-xs)] text-text-muted">
           Changes apply to open terminals immediately.
         </p>
+      </SettingsGroup>
+
+      <SettingsGroup label="Connection">
+        <SettingRow>
+          <div>
+            <label htmlFor="s-auto-reconnect" className={LABEL_CLASS}>Auto-reconnect</label>
+            <p className={DESC_CLASS}>Automatically retry a dropped connection — terminals and the file explorer — with a WinSCP-style backoff. When off, a drop shows a manual Reconnect button instead.</p>
+          </div>
+          <Toggle id="s-auto-reconnect" checked={autoReconnect} onChange={setAutoReconnect} />
+        </SettingRow>
       </SettingsGroup>
     </>
   );
