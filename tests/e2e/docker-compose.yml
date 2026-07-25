@@ -36,6 +36,26 @@ services:
       SUDO_ACCESS: "true"
     networks: [e2e]
 
+  # Programmable TCP proxy in front of an sshd, used to simulate a *silent*
+  # network drop — the case the operation-timeout / keepalive logic exists for.
+  # A clean disconnect (shell `exit`, container stop) sends FIN/RST and is
+  # detected instantly; a VPN/route drop just makes packets vanish with no RST,
+  # and only a timeout can notice that. Toxiproxy's `timeout` toxic with
+  # `timeout=0` freezes all data while holding the TCP connection open — exactly
+  # that hang — and it's togglable live over an HTTP API from the spec.
+  #
+  # Deliberately not iptables/tc/netem: those need NET_ADMIN, which GitHub
+  # Actions runners don't grant. Toxiproxy is an unprivileged sidecar, so the
+  # same test runs locally and in CI. The proxy itself is created at runtime by
+  # the spec (POST /proxies), so no per-target config lives here.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    container_name: anyscp-e2e-toxiproxy
+    # Bind the control API to all interfaces so the runner can reach it; the
+    # default is localhost-only, which would be unreachable across containers.
+    command: ["-host=0.0.0.0"]
+    networks: [e2e]
+
   sshd-key:
     image: lscr.io/linuxserver/openssh-server:latest
     container_name: anyscp-e2e-sshd-key
@@ -288,6 +308,8 @@ services:
         condition: service_started
       sshd-bastion:
         condition: service_started
+      toxiproxy:
+        condition: service_started
       sshd-tunnel-target:
         condition: service_healthy
       sshd-bastion2:
@@ -309,6 +331,12 @@ services:
       SSHD_SCP_BUSYBOX_PORT: "2222"
       SSHD_SCP_BUSYBOX_NOSTAT_HOST: sshd-scp-busybox-nostat
       SSHD_SCP_BUSYBOX_NOSTAT_PORT: "2222"
+      # Toxiproxy control API + the sshd it fronts. The spec creates a proxy at
+      # runtime and points the app's host at TOXIPROXY_SSH_HOST:<listen port it
+      # chose>, then freezes it to simulate a silent link drop.
+      TOXIPROXY_API: http://toxiproxy:8474
+      TOXIPROXY_HOST: toxiproxy
+      TOXIPROXY_UPSTREAM: sshd-pass:2222
       # ProxyJump pair: bastion is runner-reachable; the tunnel target is not.
       SSHD_BASTION_HOST: sshd-bastion
       SSHD_BASTION_PORT: "2222"

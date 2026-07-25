@@ -9,11 +9,13 @@
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 
 use russh::client::Handle;
 use russh::ChannelMsg;
 
 use crate::ssh::handler::SshClientHandler;
+use crate::ssh::health::OP_TIMEOUT;
 
 use super::listing::{self, Flavor};
 use super::{shell_quote, ScpEntry, ScpError};
@@ -28,22 +30,28 @@ pub async fn ssh_exec(
     handle: Arc<Mutex<Handle<SshClientHandler>>>,
     command: &str,
 ) -> Result<(Vec<u8>, Vec<u8>, i32), ScpError> {
+    // Channel setup is a protocol round-trip and is bounded.
     let mut channel = {
         let h = handle.lock().await;
-        h.channel_open_session()
-            .await
+        timeout(OP_TIMEOUT, h.channel_open_session())
+            .await?
             .map_err(|e| ScpError::ChannelError(e.to_string()))?
     };
 
-    channel
-        .exec(true, command.as_bytes())
-        .await
+    timeout(OP_TIMEOUT, channel.exec(true, command.as_bytes()))
+        .await?
         .map_err(|e| ScpError::ChannelError(format!("exec failed: {e}")))?;
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut exit_code: Option<i32> = None;
 
+    // Collecting output is deliberately NOT bounded. Commands here include
+    // `find` and `ls -laR` over arbitrarily large trees, which legitimately
+    // produce nothing for a long time while the server walks the filesystem —
+    // treating that silence as a dead link would abort perfectly healthy
+    // listings. It is the same reason we rejected output heuristics for hang
+    // detection generally. A link that dies mid-command is caught by keepalive.
     while let Some(msg) = channel.wait().await {
         if fold_exec_msg(msg, &mut stdout, &mut stderr, &mut exit_code) {
             break;

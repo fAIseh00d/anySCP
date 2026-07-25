@@ -13,9 +13,11 @@ use std::sync::Arc;
 use russh::client::Handle;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::ssh::handler::SshClientHandler;
+use crate::ssh::health::OP_TIMEOUT;
 
 use super::wire::{self, ScpMsg};
 use super::{shell_quote, ScpError};
@@ -57,16 +59,18 @@ where
     })?;
 
     // Open a channel and start the remote sink. `-t` = "to" (receive).
+    // Both steps are protocol round-trips, so both are bounded — on a silently
+    // dropped link they would otherwise hang until keepalive tore the session
+    // down, which is precisely the freeze this is here to prevent.
     let channel = {
         let h = handle.lock().await;
-        h.channel_open_session()
-            .await
+        timeout(OP_TIMEOUT, h.channel_open_session())
+            .await?
             .map_err(|e| ScpError::ChannelError(e.to_string()))?
     };
     let cmd = format!("scp -t -- {}", shell_quote(remote_path));
-    channel
-        .exec(true, cmd.as_bytes())
-        .await
+    timeout(OP_TIMEOUT, channel.exec(true, cmd.as_bytes()))
+        .await?
         .map_err(|e| ScpError::ChannelError(format!("exec scp -t failed: {e}")))?;
 
     let mut stream = channel.into_stream();
@@ -84,6 +88,7 @@ where
         &mut stream,
         size,
         CHUNK_SIZE,
+        wire::RemoteSide::Writer,
         || cancel.is_cancelled(),
         on_progress,
     )
@@ -118,15 +123,14 @@ where
 {
     let channel = {
         let h = handle.lock().await;
-        h.channel_open_session()
-            .await
+        timeout(OP_TIMEOUT, h.channel_open_session())
+            .await?
             .map_err(|e| ScpError::ChannelError(e.to_string()))?
     };
     // `-f` = "from" (send). `-p` would also send timestamps; we skip it.
     let cmd = format!("scp -f -- {}", shell_quote(remote_path));
-    channel
-        .exec(true, cmd.as_bytes())
-        .await
+    timeout(OP_TIMEOUT, channel.exec(true, cmd.as_bytes()))
+        .await?
         .map_err(|e| ScpError::ChannelError(format!("exec scp -f failed: {e}")))?;
 
     let mut stream = channel.into_stream();
@@ -170,6 +174,7 @@ where
         &mut local_file,
         size,
         CHUNK_SIZE,
+        wire::RemoteSide::Reader,
         || cancel.is_cancelled(),
         on_progress,
     )
@@ -179,17 +184,19 @@ where
     // failure discards the staging file before surfacing the error.
     let finish: Result<(), ScpError> = match stream_result {
         Err(e) => Err(e),
-        Ok(()) => async {
-            local_file
-                .flush()
-                .await
-                .map_err(|e| ScpError::LocalIoError(e.to_string()))?;
-            // Read the source's trailing status byte, then ack it.
-            wire::read_ack(&mut stream).await?;
-            wire::write_ack(&mut stream).await?;
-            Ok(())
+        Ok(()) => {
+            async {
+                local_file
+                    .flush()
+                    .await
+                    .map_err(|e| ScpError::LocalIoError(e.to_string()))?;
+                // Read the source's trailing status byte, then ack it.
+                wire::read_ack(&mut stream).await?;
+                wire::write_ack(&mut stream).await?;
+                Ok(())
+            }
+            .await
         }
-        .await,
     };
 
     if let Err(e) = finish {

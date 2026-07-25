@@ -17,6 +17,9 @@
 //! tested against a `tokio::io::duplex` pair without an SSH connection.
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::time::timeout;
+
+use crate::ssh::health::DATA_TIMEOUT;
 
 use super::ScpError;
 
@@ -24,6 +27,43 @@ use super::ScpError;
 /// 4 KiB; cap reads to prevent a malicious peer from forcing unbounded
 /// allocation.
 const MAX_LINE_LEN: usize = 4096;
+
+/// Which endpoint of a [`stream_bytes`] copy is the remote one.
+///
+/// Only that side may be blamed for a stall: the other is local disk, where
+/// slowness is an ordinary I/O condition and not a lost connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteSide {
+    /// Downloading — the remote is the source we read from.
+    Reader,
+    /// Uploading — the remote is the sink we write to.
+    Writer,
+}
+
+/// Bound one exchange with the remote by [`DATA_TIMEOUT`].
+///
+/// Everything in this module is part of a transfer, so the data-path budget
+/// applies throughout — including the acks, where the sink may legitimately need
+/// a moment to flush a large file before replying.
+///
+/// SCP is a strictly synchronous protocol: each side blocks on the other, so
+/// "no progress for this long" is an unambiguous signal that the link is gone.
+/// There is nothing here that is legitimately silent, which is what makes a
+/// timeout safe in this module and unsafe around command output.
+async fn bounded<T>(
+    fut: impl std::future::Future<Output = Result<T, ScpError>>,
+) -> Result<T, ScpError> {
+    match timeout(DATA_TIMEOUT, fut).await {
+        // Name the budget that actually elapsed. `Elapsed` carries no duration,
+        // so the blanket `From` impl cannot, and a message quoting the wrong
+        // constant would point at the wrong layer during debugging.
+        Err(_) => Err(ScpError::ChannelError(format!(
+            "no response from the server for {}s",
+            DATA_TIMEOUT.as_secs()
+        ))),
+        Ok(result) => result,
+    }
+}
 
 /// A single rcp-protocol record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,25 +83,31 @@ pub enum ScpMsg {
 /// Read a single ack byte. `\0` returns Ok; `\1` / `\2` read the trailing
 /// error message and surface it as `ScpError::RemoteError`.
 pub async fn read_ack<R: AsyncRead + Unpin>(reader: &mut R) -> Result<(), ScpError> {
-    let mut buf = [0u8; 1];
-    reader.read_exact(&mut buf).await?;
-    match buf[0] {
-        0 => Ok(()),
-        1 | 2 => {
-            let msg = read_line(reader).await?;
-            Err(ScpError::RemoteError(msg))
+    bounded(async {
+        let mut buf = [0u8; 1];
+        reader.read_exact(&mut buf).await?;
+        match buf[0] {
+            0 => Ok(()),
+            1 | 2 => {
+                let msg = read_line(reader).await?;
+                Err(ScpError::RemoteError(msg))
+            }
+            b => Err(ScpError::ProtocolError(format!(
+                "unexpected ack byte: 0x{b:02x}"
+            ))),
         }
-        b => Err(ScpError::ProtocolError(format!(
-            "unexpected ack byte: 0x{b:02x}"
-        ))),
-    }
+    })
+    .await
 }
 
 /// Write a single `\0` ack byte and flush.
 pub async fn write_ack<W: AsyncWrite + Unpin>(writer: &mut W) -> Result<(), ScpError> {
-    writer.write_all(&[0u8]).await?;
-    writer.flush().await?;
-    Ok(())
+    bounded(async {
+        writer.write_all(&[0u8]).await?;
+        writer.flush().await?;
+        Ok(())
+    })
+    .await
 }
 
 // ─── Line reader ─────────────────────────────────────────────────────────────
@@ -96,6 +142,10 @@ async fn read_line<R: AsyncRead + Unpin>(reader: &mut R) -> Result<String, ScpEr
 /// how `scp -f` signals "no more entries"). Errors on partial reads or
 /// malformed records.
 pub async fn read_msg<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<ScpMsg>, ScpError> {
+    bounded(read_msg_inner(reader)).await
+}
+
+async fn read_msg_inner<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<ScpMsg>, ScpError> {
     let mut byte = [0u8; 1];
     let n = reader.read(&mut byte).await?;
     if n == 0 {
@@ -150,9 +200,12 @@ pub async fn write_msg<W: AsyncWrite + Unpin>(
         ScpMsg::EndDir => "E\n".to_string(),
         ScpMsg::Time { mtime, atime } => format!("T{mtime} 0 {atime} 0\n"),
     };
-    writer.write_all(line.as_bytes()).await?;
-    writer.flush().await?;
-    Ok(())
+    bounded(async {
+        writer.write_all(line.as_bytes()).await?;
+        writer.flush().await?;
+        Ok(())
+    })
+    .await
 }
 
 fn validate_name(name: &str) -> Result<(), ScpError> {
@@ -237,6 +290,7 @@ pub async fn stream_bytes<R, W, F, C>(
     writer: &mut W,
     total: u64,
     chunk_size: usize,
+    remote: RemoteSide,
     cancel: C,
     mut on_progress: F,
 ) -> Result<(), ScpError>
@@ -255,18 +309,35 @@ where
             return Err(ScpError::TransferCancelled);
         }
         let want = (remaining as usize).min(chunk_size);
-        let n = reader.read(&mut buf[..want]).await?;
+
+        // Exactly one of these two endpoints is the network; the other is local
+        // disk. Only the network side gets a deadline, so a busy disk can never
+        // be reported as a lost connection.
+        let n = match remote {
+            RemoteSide::Reader => {
+                bounded(async { Ok(reader.read(&mut buf[..want]).await?) }).await?
+            }
+            RemoteSide::Writer => reader.read(&mut buf[..want]).await?,
+        };
         if n == 0 {
             return Err(ScpError::ProtocolError(format!(
                 "unexpected EOF: {remaining} bytes still expected"
             )));
         }
-        writer.write_all(&buf[..n]).await?;
+        match remote {
+            RemoteSide::Writer => bounded(async { Ok(writer.write_all(&buf[..n]).await?) }).await?,
+            RemoteSide::Reader => writer.write_all(&buf[..n]).await?,
+        }
+
         transferred += n as u64;
         remaining -= n as u64;
         on_progress(transferred);
     }
-    writer.flush().await?;
+
+    match remote {
+        RemoteSide::Writer => bounded(async { Ok(writer.flush().await?) }).await?,
+        RemoteSide::Reader => writer.flush().await?,
+    }
     Ok(())
 }
 
@@ -282,6 +353,104 @@ mod tests {
         let (mut a, mut b) = duplex(64);
         write_ack(&mut a).await.unwrap();
         read_ack(&mut b).await.unwrap();
+    }
+
+    // ── Stall detection ─────────────────────────────────────────────────────
+    //
+    // SCP is strictly synchronous, so a peer that goes quiet mid-exchange is
+    // gone. These use a paused clock, so they assert the real budget without
+    // making the suite wait it out.
+
+    /// A peer that is connected but will never answer — what a silently dropped
+    /// link looks like from inside the protocol.
+    struct SilentPeer;
+
+    impl tokio::io::AsyncRead for SilentPeer {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    impl tokio::io::AsyncWrite for SilentPeer {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Pending
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_ack_that_never_arrives_reports_a_lost_connection() {
+        let err = read_ack(&mut SilentPeer).await.unwrap_err();
+        assert!(
+            err.is_connection_lost(),
+            "an unanswered ack must declare the link dead, got {err}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_record_that_never_arrives_reports_a_lost_connection() {
+        let err = read_msg(&mut SilentPeer).await.unwrap_err();
+        assert!(err.is_connection_lost(), "got {err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_download_reports_a_lost_connection() {
+        let mut local = Vec::new();
+        let err = stream_bytes(
+            &mut SilentPeer,
+            &mut local,
+            100,
+            8,
+            RemoteSide::Reader,
+            || false,
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(err.is_connection_lost(), "got {err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_upload_reports_a_lost_connection() {
+        let payload = [7u8; 100];
+        let err = stream_bytes(
+            &mut &payload[..],
+            &mut SilentPeer,
+            100,
+            8,
+            RemoteSide::Writer,
+            || false,
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(err.is_connection_lost(), "got {err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_exchange_gives_up_after_the_data_timeout() {
+        let started = tokio::time::Instant::now();
+        let _ = read_ack(&mut SilentPeer).await;
+        assert_eq!(started.elapsed(), DATA_TIMEOUT);
     }
 
     #[tokio::test]
@@ -454,6 +623,7 @@ mod tests {
             &mut a,
             total,
             4,
+            RemoteSide::Writer,
             || false,
             |done| progress_calls.push(done),
         )
@@ -478,6 +648,7 @@ mod tests {
             &mut sink,
             100,
             8,
+            RemoteSide::Writer,
             || true, // cancelled from the start
             |_| {},
         )

@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::info;
 
 use super::handler::SshClientHandler;
 use super::session::SshSession;
@@ -17,9 +17,27 @@ use super::session::SshSession;
 /// keepalive both prevents server idle-timeout drops and — after `keepalive_max`
 /// unanswered probes — lets russh detect a genuinely dead peer, which the
 /// reconnect UI depends on. A host may override; an explicit 0 disables it.
-const DEFAULT_KEEPALIVE_SECS: u64 = 30;
+///
+/// Deliberately not tuned aggressively. Keepalive is the **last resort**, not
+/// the usual detector: an in-flight request fails on its own budget (see
+/// `ssh::health::OP_TIMEOUT` / `DATA_TIMEOUT`), and a network that goes away in
+/// a way the OS notices closes the socket outright — measured on a VPN drop, the
+/// terminal's channel closed 2.8 s and 12.8 s after the transfer timed out, on
+/// two runs of the same test. Neither came anywhere near keepalive. Shortening
+/// this further would buy nothing on the paths that actually fire, while adding
+/// probe traffic to every idle session.
+const DEFAULT_KEEPALIVE_SECS: u64 = 10;
 
 /// Unanswered keepalive probes before russh declares the peer dead.
+///
+/// Beware the arithmetic: russh tests `alive_timeouts > keepalive_max` *before*
+/// incrementing, so teardown happens on probe `KEEPALIVE_MAX + 2`, i.e. after
+/// `(KEEPALIVE_MAX + 2) * DEFAULT_KEEPALIVE_SECS` ≈ 50 s of total silence — not
+/// the 30 s the two constants appear to say.
+///
+/// Kept at 3 rather than lowered alongside the interval: the count is what
+/// absorbs individual lost probes, so trading it away to reach the same number
+/// would make an idle-but-healthy session on a lossy link easier to kill.
 const KEEPALIVE_MAX: usize = 3;
 
 /// How often the bare-connection liveness monitor polls the handle. A no-PTY
@@ -191,6 +209,7 @@ impl SshManager {
 
         let session = outcome?;
         self.sessions.insert(sid.clone(), session);
+        super::health::mark_alive(&sid);
 
         Ok(session_id)
     }
@@ -246,15 +265,13 @@ impl SshManager {
             let monitored_sid = sid.clone();
             tokio::spawn(async move {
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(BARE_MONITOR_POLL_SECS)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(BARE_MONITOR_POLL_SECS))
+                        .await;
                     if handle.lock().await.is_closed() {
-                        warn!(session_id = %monitored_sid, "SSH connection lost (no PTY / SFTP; peer stopped answering keepalives)");
-                        let _ = app.emit(
-                            "ssh:status",
-                            &SshStatusPayload {
-                                session_id: monitored_sid.clone(),
-                                status: ConnectionStatus::Disconnected,
-                            },
+                        super::health::mark_disconnected(
+                            &monitored_sid,
+                            "keepalive: peer stopped answering (no PTY / SFTP)",
+                            &app,
                         );
                         break;
                     }
@@ -271,6 +288,7 @@ impl SshManager {
                 monitor,
             },
         );
+        super::health::mark_alive(&sid);
 
         Ok(session_id)
     }
@@ -475,7 +493,8 @@ impl SshManager {
         )
         .await?;
 
-        self.sessions.insert(sid, session);
+        self.sessions.insert(sid.clone(), session);
+        super::health::mark_alive(&sid);
         Ok(new_id)
     }
 
@@ -492,11 +511,7 @@ impl SshManager {
     ///
     /// Split panes reconnect independently in v1 (each carries its own
     /// HostConfig); a shared-connection group reconnect is a later refinement.
-    pub async fn reconnect(
-        &self,
-        session_id: &str,
-        app_handle: AppHandle,
-    ) -> Result<(), SshError> {
+    pub async fn reconnect(&self, session_id: &str, app_handle: AppHandle) -> Result<(), SshError> {
         let config = {
             let entry = self
                 .sessions
@@ -538,6 +553,9 @@ impl SshManager {
                     let _ = old.disconnect().await;
                 }
                 self.sessions.insert(session_id.to_string(), new_session);
+                // Same id, fresh transport — clear the dead flag so a later
+                // death is reported again.
+                super::health::mark_alive(session_id);
                 info!(session_id = %session_id, host = %config.host, "SSH reconnected");
                 Ok(())
             }
@@ -618,6 +636,8 @@ impl SshManager {
             },
         );
 
+        // Session is gone — drop its dead-flag entry so the map stays bounded.
+        super::health::mark_alive(session_id);
         info!(session_id = %session_id, "SSH disconnected");
         Ok(())
     }

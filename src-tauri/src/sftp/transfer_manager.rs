@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use super::{
-    validate_remote_name, SftpError, SftpManager, TransferDirection, TransferEvent, TransferInfo,
-    TransferStatus,
+    remote_io, remote_write_all, request, validate_remote_name, SftpError, SftpManager,
+    TransferDirection, TransferEvent, TransferInfo, TransferStatus,
 };
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -318,9 +318,7 @@ impl TransferManager {
 
             let attrs = {
                 let sftp = sftp_arc.lock().await;
-                sftp.metadata(&remote_path)
-                    .await
-                    .map_err(|e| SftpError::RemoteIoError(e.to_string()))?
+                request(sftp.metadata(&remote_path)).await?
             };
 
             let (kind, total_bytes, files_total) =
@@ -508,8 +506,10 @@ async fn walk_remote_dir_inner(
 
     let entries = {
         let sftp = sftp_arc.lock().await;
-        match sftp.read_dir(path).await {
+        match request(sftp.read_dir(path)).await {
             Ok(e) => e,
+            // Pre-flight size estimation only — an unreadable directory just
+            // contributes nothing. Bounded so a dead link can't stall the walk.
             Err(_) => return (0, 0),
         }
     };
@@ -786,6 +786,34 @@ async fn execute_transfer(
                     "total_bytes": job_total_bytes,
                 }),
             );
+
+            // A transfer notices a dead link sooner than the keepalive does, but
+            // only because its requests are bounded (see `remote_io` /
+            // `request`): a silent drop produces no error at all on its own, so
+            // without those timeouts this branch would never run. Route it
+            // through the shared trigger (idempotent) so the UI reacts as soon
+            // as a block times out rather than waiting out the keepalive. Only
+            // connection-level errors count: a permission/disk/missing-file
+            // failure must not declare the link dead.
+            if e.is_connection_lost() {
+                let ssh_session_id = jobs
+                    .get(job_id)
+                    .map(|j| j.sftp_session_id.clone())
+                    .and_then(|sid| {
+                        sftp_manager
+                            .get_session(&sid)
+                            .ok()
+                            .map(|s| s.ssh_session_id.clone())
+                    });
+                if let Some(ssh_session_id) = ssh_session_id {
+                    crate::ssh::health::mark_disconnected(
+                        &ssh_session_id,
+                        "transfer failed with a connection-level error",
+                        app_handle,
+                    );
+                }
+            }
+
             set_job_status(
                 jobs,
                 job_id,
@@ -974,16 +1002,12 @@ async fn run_upload_file(
         OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE
     } else {
         let sftp = sftp_arc.lock().await;
-        let mut f = sftp
-            .open_with_flags(
-                remote_path,
-                OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
-            )
-            .await
-            .map_err(|e| SftpError::RemoteIoError(format!("Cannot write to {remote_path}: {e}")))?;
-        f.shutdown()
-            .await
-            .map_err(|e| SftpError::RemoteIoError(format!("Cannot write to {remote_path}: {e}")))?;
+        let mut f = request(sftp.open_with_flags(
+            remote_path,
+            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+        ))
+        .await?;
+        remote_io(f.shutdown()).await?;
         OpenFlags::WRITE
     };
 
@@ -1030,7 +1054,7 @@ async fn run_upload_file(
         // removing the partial is the better of two lossy outcomes.
         if remove_partial {
             let sftp = sftp_arc.lock().await;
-            let _ = sftp.remove_file(remote_path).await;
+            let _ = request(sftp.remove_file(remote_path)).await;
         }
         return Err(e);
     }
@@ -1057,6 +1081,14 @@ async fn upload_region(ctx: Arc<UploadFileCtx>, start: u64, end: u64) -> Result<
     let remote_ctx = |e: &dyn std::fmt::Display| {
         SftpError::RemoteIoError(format!("Cannot write to {}: {e}", ctx.remote_path))
     };
+    // Annotating a remote failure must not flatten its kind. `remote_ctx` builds
+    // a RemoteIoError, which is deliberately *not* connection-lost; applying it
+    // to an already-classified error would erase the disconnect and leave the
+    // transfer looking like an ordinary per-file problem.
+    let remote_kept = |e: SftpError| match e {
+        SftpError::RemoteIoError(msg) => remote_ctx(&msg),
+        other => other,
+    };
 
     let mut local_file = tokio::fs::File::open(&ctx.local_path)
         .await
@@ -1068,14 +1100,13 @@ async fn upload_region(ctx: Arc<UploadFileCtx>, start: u64, end: u64) -> Result<
 
     let mut remote_file = {
         let sftp = ctx.sftp_arc.lock().await;
-        sftp.open_with_flags(&ctx.remote_path, ctx.open_flags)
+        request(sftp.open_with_flags(&ctx.remote_path, ctx.open_flags))
             .await
-            .map_err(|e| incomplete(remote_ctx(&e)))?
+            .map_err(|e| incomplete(remote_kept(e)))?
     };
-    remote_file
-        .seek(std::io::SeekFrom::Start(start))
+    remote_io(remote_file.seek(std::io::SeekFrom::Start(start)))
         .await
-        .map_err(|e| incomplete(remote_ctx(&e)))?;
+        .map_err(|e| incomplete(remote_kept(e)))?;
 
     copy_region(
         &mut local_file,
@@ -1096,17 +1127,18 @@ async fn upload_region(ctx: Arc<UploadFileCtx>, start: u64, end: u64) -> Result<
     .map_err(|err| {
         incomplete(match err {
             SftpError::LocalIoError(msg) => local_ctx(&msg),
-            SftpError::RemoteIoError(msg) => remote_ctx(&msg),
-            other => other,
+            other => remote_kept(other),
         })
     })?;
 
     // Every byte is written and acked past this point: a close failure is
     // surfaced but must not count as a partial upload.
-    remote_file.shutdown().await.map_err(|e| RegionError {
-        err: remote_ctx(&e),
-        write_complete: true,
-    })
+    remote_io(remote_file.shutdown())
+        .await
+        .map_err(|e| RegionError {
+            err: remote_kept(e),
+            write_complete: true,
+        })
 }
 
 /// Pump `len` bytes from `local` into `remote` in `CHUNK_SIZE` chunks,
@@ -1116,6 +1148,10 @@ async fn upload_region(ctx: Arc<UploadFileCtx>, start: u64, end: u64) -> Result<
 /// A source that runs dry before `len` bytes is an error, not EOF: regions
 /// are planned from the file size up front, and a silently short region would
 /// leave a hole of stale or zero bytes in the assembled remote file.
+///
+/// Only the **remote** write is bounded by a timeout. Reading the local file is
+/// a disk operation: it can be slow for reasons that have nothing to do with the
+/// link, and reporting a busy disk as a lost connection would be wrong.
 async fn copy_region<R, W, F>(
     local: &mut R,
     remote: &mut W,
@@ -1144,10 +1180,7 @@ where
                 "file shrank during upload ({remaining} bytes missing)"
             )));
         }
-        remote
-            .write_all(&buf[..n])
-            .await
-            .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+        remote_write_all(remote, &buf[..n]).await?;
         remaining -= n as u64;
         on_progress(n as u64)?;
     }
@@ -1257,9 +1290,7 @@ async fn run_download_file(
 ) -> Result<(), SftpError> {
     let mut remote_file = {
         let sftp = sftp_arc.lock().await;
-        sftp.open(remote_path)
-            .await
-            .map_err(|e| SftpError::RemoteIoError(e.to_string()))?
+        request(sftp.open(remote_path)).await?
     };
 
     // Ensure local parent directory exists.
@@ -1285,10 +1316,10 @@ async fn run_download_file(
             return Err(SftpError::TransferCancelled);
         }
 
-        let n = remote_file
-            .read(&mut buf)
-            .await
-            .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+        // Bounded: one `read` is one SFTP request, so a stalled reply means the
+        // link is hung rather than the file being slow. The local write below
+        // stays unbounded — a busy disk is not a dead connection.
+        let n = remote_io(remote_file.read(&mut buf)).await?;
         if n == 0 {
             break;
         }
@@ -1310,10 +1341,7 @@ async fn run_download_file(
         .await
         .map_err(|e| SftpError::LocalIoError(e.to_string()))?;
 
-    remote_file
-        .shutdown()
-        .await
-        .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+    remote_io(remote_file.shutdown()).await?;
 
     // Move the completed download into place — done last, so any earlier
     // failure leaves only the .part behind, never a truncated final file.
@@ -1367,9 +1395,7 @@ async fn download_dir_recursive(
 ) -> Result<(), SftpError> {
     let entries = {
         let sftp = sftp_arc.lock().await;
-        sftp.read_dir(remote_dir)
-            .await
-            .map_err(|e| SftpError::RemoteIoError(e.to_string()))?
+        request(sftp.read_dir(remote_dir)).await?
     };
 
     for entry in entries {
@@ -1437,10 +1463,16 @@ async fn remote_mkdir_p(
 
     for seg in segments {
         current = format!("{current}/{seg}");
-        match sftp.create_dir(&current).await {
+        // "Already exists" is the expected failure here and is absorbed by the
+        // metadata probe. A dead link is not: it propagates, so a disconnect
+        // during a directory upload is reported as one instead of as a generic
+        // mkdir failure.
+        match request(sftp.create_dir(&current)).await {
             Ok(()) => {}
-            Err(_) => match sftp.metadata(&current).await {
+            Err(e) if e.is_connection_lost() => return Err(e),
+            Err(_) => match request(sftp.metadata(&current)).await {
                 Ok(attrs) if attrs.file_type() == russh_sftp::protocol::FileType::Dir => {}
+                Err(e) if e.is_connection_lost() => return Err(e),
                 _ => {
                     return Err(SftpError::RemoteIoError(format!(
                         "failed to create remote directory: {current}"

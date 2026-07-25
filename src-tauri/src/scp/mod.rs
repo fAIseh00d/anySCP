@@ -45,6 +45,22 @@ pub enum ScpError {
     ParseError(String),
 }
 
+impl ScpError {
+    /// True when this failure means the SSH link itself is gone, rather than a
+    /// per-file problem (permission, missing path, failed remote command). Only
+    /// these should declare the connection dead — mirrors SftpError's rule and
+    /// the frontend's CONNECTION_LOST_KINDS.
+    pub fn is_connection_lost(&self) -> bool {
+        matches!(
+            self,
+            ScpError::ChannelError(_)
+                | ScpError::ProtocolError(_)
+                | ScpError::SshSessionNotFound(_)
+                | ScpError::SessionNotFound(_)
+        )
+    }
+}
+
 /// Serialize as `{ kind, message }` — same convention as SshError / SftpError.
 impl Serialize for ScpError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -76,6 +92,17 @@ impl Serialize for ScpError {
 impl From<std::io::Error> for ScpError {
     fn from(err: std::io::Error) -> Self {
         ScpError::RemoteIoError(err.to_string())
+    }
+}
+
+/// An SCP exchange that exceeded its budget means the link is hung, not that the
+/// file was a problem — so it must classify as connection-lost.
+///
+/// SCP has no request ids and no framing to recover from a half-finished
+/// exchange, so a timeout here is always terminal for the channel.
+impl From<tokio::time::error::Elapsed> for ScpError {
+    fn from(_: tokio::time::error::Elapsed) -> Self {
+        ScpError::ChannelError("the server stopped responding".to_string())
     }
 }
 

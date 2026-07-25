@@ -4,9 +4,10 @@ use russh::ChannelMsg;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, Mutex};
-use tracing::warn;
+use tokio::time::timeout;
 
 use super::handler::SshClientHandler;
+use super::health::OP_TIMEOUT;
 
 /// Commands sent from the frontend to the reader/writer task.
 enum SessionCmd {
@@ -128,12 +129,11 @@ impl SshSession {
                                 let _ = reader_app.emit("ssh:output", &payload);
                             }
                             Some(ChannelMsg::Eof | ChannelMsg::Close) | None => {
-                                warn!(session_id = %reader_session_id, "SSH connection lost (channel closed)");
-                                let status_payload = SshStatusPayload {
-                                    session_id: reader_session_id.clone(),
-                                    status: ConnectionStatus::Disconnected,
-                                };
-                                let _ = reader_app.emit("ssh:status", &status_payload);
+                                super::health::mark_disconnected(
+                                    &reader_session_id,
+                                    "PTY channel closed",
+                                    &reader_app,
+                                );
                                 break;
                             }
                             _ => {}
@@ -190,27 +190,27 @@ impl SshSession {
         config: HostConfig,
     ) -> Result<Self, SshError> {
         let default_shell = config.default_shell.clone();
-        let channel = handle
-            .lock()
-            .await
-            .channel_open_session()
-            .await
+        // Unlike `new`, this rides on a connection that has been alive for a
+        // while and may already be silently dead — splitting a terminal onto a
+        // dropped link is one of the freezes this bound exists to prevent.
+        let channel = timeout(OP_TIMEOUT, handle.lock().await.channel_open_session())
+            .await?
             .map_err(|e| SshError::ChannelError(e.to_string()))?;
 
-        channel
-            .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
-            .await
-            .map_err(|e| SshError::ChannelError(e.to_string()))?;
+        timeout(
+            OP_TIMEOUT,
+            channel.request_pty(false, "xterm-256color", cols, rows, 0, 0, &[]),
+        )
+        .await?
+        .map_err(|e| SshError::ChannelError(e.to_string()))?;
 
         if let Some(shell) = &default_shell {
-            channel
-                .exec(false, shell.as_bytes())
-                .await
+            timeout(OP_TIMEOUT, channel.exec(false, shell.as_bytes()))
+                .await?
                 .map_err(|e| SshError::ChannelError(e.to_string()))?;
         } else {
-            channel
-                .request_shell(false)
-                .await
+            timeout(OP_TIMEOUT, channel.request_shell(false))
+                .await?
                 .map_err(|e| SshError::ChannelError(e.to_string()))?;
         }
 
@@ -240,12 +240,11 @@ impl SshSession {
                                 let _ = reader_app.emit("ssh:output", &payload);
                             }
                             Some(ChannelMsg::Eof | ChannelMsg::Close) | None => {
-                                warn!(session_id = %reader_session_id, "SSH connection lost (channel closed)");
-                                let status_payload = SshStatusPayload {
-                                    session_id: reader_session_id.clone(),
-                                    status: ConnectionStatus::Disconnected,
-                                };
-                                let _ = reader_app.emit("ssh:status", &status_payload);
+                                super::health::mark_disconnected(
+                                    &reader_session_id,
+                                    "PTY channel closed",
+                                    &reader_app,
+                                );
                                 break;
                             }
                             _ => {}

@@ -58,6 +58,17 @@ impl From<std::io::Error> for SshError {
     }
 }
 
+/// A channel operation that exceeded its budget means the link is hung.
+///
+/// `ChannelError` rather than `ConnectionFailed`, matching what SFTP and SCP
+/// produce for the same condition — the frontend's `CONNECTION_LOST_KINDS`
+/// treats `channel_error` as a disconnect, so all three protocols agree.
+impl From<tokio::time::error::Elapsed> for SshError {
+    fn from(_: tokio::time::error::Elapsed) -> Self {
+        SshError::ChannelError("the server stopped responding".to_string())
+    }
+}
+
 impl From<russh::Error> for SshError {
     fn from(e: russh::Error) -> Self {
         SshError::ConnectionFailed(e.to_string())

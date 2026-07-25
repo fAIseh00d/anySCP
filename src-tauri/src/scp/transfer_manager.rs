@@ -637,6 +637,31 @@ async fn execute_transfer(
                     "total_bytes": total_bytes,
                 }),
             );
+            // Same reasoning as the SFTP path: a transfer notices a dead link
+            // sooner than an idle keepalive would, but only because the wire
+            // exchanges are bounded (see `wire::bounded`) — a silent drop
+            // produces no error on its own. Route it through the shared
+            // (idempotent) trigger. Connection-level errors only: a failed
+            // remote command or permission error is not a dead link.
+            if e.is_connection_lost() {
+                let ssh_session_id =
+                    jobs.get(job_id)
+                        .map(|j| j.scp_session_id.clone())
+                        .and_then(|sid| {
+                            scp_manager
+                                .get_session(&sid)
+                                .ok()
+                                .map(|s| s.ssh_session_id.clone())
+                        });
+                if let Some(ssh_session_id) = ssh_session_id {
+                    crate::ssh::health::mark_disconnected(
+                        &ssh_session_id,
+                        "transfer failed with a connection-level error",
+                        app_handle,
+                    );
+                }
+            }
+
             set_job_status(
                 jobs,
                 job_id,

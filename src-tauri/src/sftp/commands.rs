@@ -6,16 +6,18 @@ use std::time::{Duration, SystemTime};
 use russh_sftp::protocol::{FileAttributes, FileType, OpenFlags};
 use tauri::{AppHandle, Emitter, State, Window};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
+use crate::ssh::health::OP_TIMEOUT;
 use crate::ssh::manager::SshManager;
 
 use super::transfer_manager::TransferManager;
 use super::{
-    format_permissions, validate_remote_name, ChmodSummary, SftpEntry, SftpEntryType, SftpError,
-    SftpManager, SftpSessionWrapper, TransferDirection, TransferInfo, TransferProgress,
-    TransferStatus,
+    format_permissions, remote_io, remote_write_all, request, timed_out, validate_remote_name,
+    ChmodSummary, SftpEntry, SftpEntryType, SftpError, SftpManager, SftpSessionWrapper,
+    TransferDirection, TransferInfo, TransferProgress, TransferStatus,
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -28,13 +30,19 @@ async fn mkdir_p(sftp: &russh_sftp::client::SftpSession, path: &str) -> Result<(
 
     for seg in segments {
         current = format!("{current}/{seg}");
-        // Try to create — ignore "already exists" errors
-        match sftp.create_dir(&current).await {
+        // Try to create — ignore "already exists" errors. A dead link is not an
+        // "already exists" error, so it propagates instead of being folded into
+        // the generic failure below; otherwise a disconnect mid-mkdir would be
+        // reported as an ordinary remote I/O problem and never reach the
+        // connection-lost trip.
+        match request(sftp.create_dir(&current)).await {
             Ok(()) => {}
+            Err(e) if e.is_connection_lost() => return Err(e),
             Err(_) => {
                 // Check if it already exists as a directory — if so, continue
-                match sftp.metadata(&current).await {
+                match request(sftp.metadata(&current)).await {
                     Ok(attrs) if attrs.file_type() == FileType::Dir => {}
+                    Err(e) if e.is_connection_lost() => return Err(e),
                     _ => {
                         return Err(SftpError::RemoteIoError(format!(
                             "failed to create directory: {current}"
@@ -54,10 +62,7 @@ async fn delete_dir_recursive(
     path: &str,
 ) -> Result<(), SftpError> {
     // List all entries in the directory
-    let entries = sftp
-        .read_dir(path)
-        .await
-        .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+    let entries = request(sftp.read_dir(path)).await?;
 
     for entry in entries {
         let name = entry.file_name();
@@ -77,16 +82,12 @@ async fn delete_dir_recursive(
             Box::pin(delete_dir_recursive(sftp, &full_path)).await?;
         } else {
             // Delete file
-            sftp.remove_file(&full_path)
-                .await
-                .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+            request(sftp.remove_file(&full_path)).await?;
         }
     }
 
     // Now the directory should be empty — remove it
-    sftp.remove_dir(path)
-        .await
-        .map_err(|e| SftpError::RemoteIoError(e.to_string()))
+    request(sftp.remove_dir(path)).await
 }
 
 // ─── Open / Close ────────────────────────────────────────────────────────────
@@ -107,11 +108,14 @@ pub async fn sftp_open(
         .map_err(|e| SftpError::SshSessionNotFound(e.to_string()))?;
 
     // 2. Lock only long enough to open the channel, then release immediately.
+    //    Opening a channel is a protocol round-trip, so it is bounded: on a
+    //    silently dropped link the request would otherwise hang until keepalive
+    //    tore the whole session down.
     let channel = {
         let handle = handle_arc.lock().await;
-        handle
-            .channel_open_session()
+        timeout(OP_TIMEOUT, handle.channel_open_session())
             .await
+            .map_err(|_| timed_out(OP_TIMEOUT))?
             .map_err(|e| SftpError::ChannelError(e.to_string()))?
     };
 
@@ -125,18 +129,23 @@ pub async fn sftp_open(
         // `sudo -n true` exits non-zero immediately when a password is required.
         let mut check = {
             let handle = handle_arc.lock().await;
-            handle
-                .channel_open_session()
+            timeout(OP_TIMEOUT, handle.channel_open_session())
                 .await
+                .map_err(|_| timed_out(OP_TIMEOUT))?
                 .map_err(|e| SftpError::ChannelError(e.to_string()))?
         };
-        check
-            .exec(true, "sudo -n true")
+        timeout(OP_TIMEOUT, check.exec(true, "sudo -n true"))
             .await
+            .map_err(|_| timed_out(OP_TIMEOUT))?
             .map_err(|e| SftpError::ChannelError(e.to_string()))?;
         // Read until the channel closes. NB: the server often sends `Eof`
         // BEFORE the `exit-status` request, so we must NOT break on `Eof` or
         // we'd miss the status and treat a passwordless host as a failure.
+        //
+        // Deliberately NOT bounded by OP_TIMEOUT: this awaits command *output*,
+        // not a protocol round-trip. `sudo -n true` is fast, but the rule has to
+        // hold everywhere or it stops being a rule — a silent link here is
+        // caught by keepalive, same as any other long-running command.
         let mut sudo_exit = None;
         while let Some(msg) = check.wait().await {
             match msg {
@@ -158,33 +167,46 @@ pub async fn sftp_open(
         // sftp-server on $PATH first (portable `command -v`, not the non-POSIX
         // `which`) then the known per-distro install paths, so this works on
         // Debian/Ubuntu, RHEL/Fedora, Alpine and Arch.
-        channel
-            .exec(
+        timeout(
+            OP_TIMEOUT,
+            channel.exec(
                 true,
                 "sudo -n /bin/sh -c 'for p in \"$(command -v sftp-server 2>/dev/null)\" \
                  /usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server \
                  /usr/lib/ssh/sftp-server /usr/libexec/sftp-server; do \
                  [ -x \"$p\" ] && exec \"$p\"; done; \
                  echo \"sftp-server: not found\" >&2; exit 127'",
-            )
-            .await
-            .map_err(|e| SftpError::ChannelError(e.to_string()))?;
+            ),
+        )
+        .await
+        .map_err(|_| timed_out(OP_TIMEOUT))?
+        .map_err(|e| SftpError::ChannelError(e.to_string()))?;
     } else {
-        channel
-            .request_subsystem(true, "sftp")
+        timeout(OP_TIMEOUT, channel.request_subsystem(true, "sftp"))
             .await
+            .map_err(|_| timed_out(OP_TIMEOUT))?
             .map_err(|e| SftpError::ChannelError(e.to_string()))?;
     }
 
-    // 4. Hand the channel's byte-stream to the russh-sftp client (10 s default
-    //    init timeout). Do NOT raise this: russh's request_subsystem above
-    //    returns *before* the server's accept/reject reply, so on a host
-    //    without the SFTP subsystem (e.g. SCP-only) this init is what fails —
-    //    a longer timeout just delays the frontend's SFTP→SCP fallback by that
-    //    much (a 30 s value broke the SCP-fallback e2e specs).
+    // 4. Hand the channel's byte-stream to the russh-sftp client.
+    //
+    //    `new()` performs the SFTP init under russh-sftp's own 10 s default. Do
+    //    NOT raise that: russh's request_subsystem above returns *before* the
+    //    server's accept/reject reply, so on a host without the SFTP subsystem
+    //    (e.g. SCP-only) this init is what fails — a longer timeout just delays
+    //    the frontend's SFTP→SCP fallback by that much (a 30 s value broke the
+    //    SCP-fallback e2e specs).
+    //
+    //    That constraint is about **init only**. Once init has succeeded the
+    //    same value would govern every subsequent request, which is not what we
+    //    want: our own OP_TIMEOUT is the authoritative per-request bound (see
+    //    `sftp::request`), so the library's timer is pushed out to a backstop
+    //    immediately afterwards. Raising the backstop cannot affect the fallback
+    //    because the fallback is decided before this line returns.
     let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
         .await
         .map_err(|e| SftpError::ProtocolError(e.to_string()))?;
+    sftp.set_timeout(super::RUSSH_REQUEST_BACKSTOP_SECS).await;
 
     // 5. Store and return a fresh ID.
     let sftp_id = uuid::Uuid::new_v4().to_string();
@@ -217,9 +239,11 @@ pub async fn sftp_close(
 
     sftp_manager.remove_session(&sftp_session_id);
 
-    // Best-effort close — ignore errors (server may have already terminated).
+    // Best-effort close — ignore errors (server may have already terminated),
+    // but still bounded: closing a session must not block teardown if the peer
+    // is gone.
     let sftp = sftp_arc.lock().await;
-    let _ = sftp.close().await;
+    let _ = timeout(OP_TIMEOUT, sftp.close()).await;
 
     tracing::info!(sftp_session_id = %sftp_session_id, "SFTP session closed");
     crate::telemetry::capture("sftp_closed", serde_json::json!({}));
@@ -257,10 +281,7 @@ pub async fn sftp_list_dir(
     };
 
     let sftp = sftp_arc.lock().await;
-    let read_dir = sftp
-        .read_dir(&path)
-        .await
-        .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+    let read_dir = request(sftp.read_dir(&path)).await?;
 
     // ReadDir already skips "." and ".." entries internally.
     //
@@ -288,8 +309,11 @@ pub async fn sftp_list_dir(
             // Follow the link. A broken/dangling symlink (or an unreadable
             // target) leaves it typed as a symlink — double-click just won't
             // navigate, rather than erroring.
-            match sftp.metadata(&full_path).await {
+            match request(sftp.metadata(&full_path)).await {
                 Ok(target) => resolve_entry_type(target.file_type()),
+                // A dead link is not a dangling symlink: propagate it rather
+                // than silently typing every entry as a symlink.
+                Err(e) if e.is_connection_lost() => return Err(e),
                 Err(_) => SftpEntryType::Symlink,
             }
         } else {
@@ -338,9 +362,7 @@ pub async fn sftp_home_dir(
     };
 
     let sftp = sftp_arc.lock().await;
-    sftp.canonicalize(".")
-        .await
-        .map_err(|e| SftpError::RemoteIoError(e.to_string()))
+    request(sftp.canonicalize(".")).await
 }
 
 /// Create a remote directory, including any intermediate directories (mkdir -p).
@@ -389,10 +411,7 @@ pub async fn sftp_create_file(
     }
 
     // Create the file
-    let file = sftp
-        .open_with_flags(&path, OpenFlags::CREATE | OpenFlags::WRITE)
-        .await
-        .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+    let file = request(sftp.open_with_flags(&path, OpenFlags::CREATE | OpenFlags::WRITE)).await?;
     drop(file);
     crate::telemetry::capture("sftp_file_created", serde_json::json!({}));
     Ok(())
@@ -416,9 +435,7 @@ pub async fn sftp_delete(
     let result = if is_dir {
         delete_dir_recursive(&sftp, &path).await
     } else {
-        sftp.remove_file(&path)
-            .await
-            .map_err(|e| SftpError::RemoteIoError(e.to_string()))
+        request(sftp.remove_file(&path)).await
     };
     if result.is_ok() {
         crate::telemetry::capture(
@@ -444,10 +461,7 @@ pub async fn sftp_rename(
     };
 
     let sftp = sftp_arc.lock().await;
-    let result = sftp
-        .rename(&old_path, &new_path)
-        .await
-        .map_err(|e| SftpError::RemoteIoError(e.to_string()));
+    let result = request(sftp.rename(&old_path, &new_path)).await;
     if result.is_ok() {
         crate::telemetry::capture("sftp_entry_renamed", serde_json::json!({}));
     }
@@ -481,7 +495,7 @@ pub async fn sftp_chmod(
             );
             Ok(())
         }
-        Err(msg) => Err(SftpError::RemoteIoError(msg)),
+        Err(e) => Err(e),
     }
 }
 
@@ -518,18 +532,22 @@ fn perms_match(current: &FileAttributes, requested: u32) -> bool {
 /// Returns `Ok(true)` when the server acknowledged the change, `Ok(false)` when
 /// it replied with an error that a follow-up `stat` proved to be a false
 /// positive (a known quirk where the server applies the chmod but still returns
-/// SSH_FX_PERMISSION_DENIED / SSH_FX_FAILURE), and `Err(message)` for a genuine
-/// failure. Both `Ok` variants mean the file now holds the requested mode, so
-/// callers must count them equally. The error message is prefixed with the path
-/// for recursive summaries.
+/// SSH_FX_PERMISSION_DENIED / SSH_FX_FAILURE), and `Err` for a genuine failure.
+/// Both `Ok` variants mean the file now holds the requested mode, so callers
+/// must count them equally.
+///
+/// Returns a typed error rather than a formatted string so the recursive caller
+/// can tell a per-file refusal (collect it and carry on) from a dead link (stop
+/// immediately — every remaining path would just burn another `OP_TIMEOUT`).
 async fn apply_chmod_one(
     sftp: &russh_sftp::client::SftpSession,
     path: &str,
     requested: u32,
-) -> Result<bool, String> {
-    match sftp.set_metadata(path, chmod_attrs(requested)).await {
+) -> Result<bool, SftpError> {
+    match request(sftp.set_metadata(path, chmod_attrs(requested))).await {
         Ok(_) => Ok(true),
-        Err(e) => match sftp.metadata(path).await {
+        Err(e) if e.is_connection_lost() => Err(e),
+        Err(e) => match request(sftp.metadata(path)).await {
             Ok(current) if perms_match(&current, requested) => {
                 tracing::warn!(
                     error = %e,
@@ -539,7 +557,8 @@ async fn apply_chmod_one(
                 );
                 Ok(false)
             }
-            _ => Err(format!("{path}: {e}")),
+            Err(probe) if probe.is_connection_lost() => Err(probe),
+            _ => Err(e),
         },
     }
 }
@@ -587,10 +606,14 @@ pub async fn sftp_chmod_recursive(
     while let Some(dir) = stack.pop() {
         let listing = {
             let sftp = sftp_arc.lock().await;
-            sftp.read_dir(&dir).await
+            request(sftp.read_dir(&dir)).await
         };
         let entries = match listing {
             Ok(e) => e,
+            // An unreadable directory is per-path: record it and keep walking.
+            // A dead link is not — every remaining path would burn another
+            // OP_TIMEOUT and the summary would be pages of the same failure.
+            Err(e) if e.is_connection_lost() => return Err(e),
             Err(e) => {
                 errors.push(format!("{dir}: {e}"));
                 continue;
@@ -635,7 +658,10 @@ pub async fn sftp_chmod_recursive(
             // only `Ok(true)` would report 0 applied on servers that always
             // reply with an error but apply the change anyway.
             Ok(_) => applied += 1,
-            Err(msg) => errors.push(msg),
+            // Same split as phase 1: a per-file refusal joins the summary, a
+            // dead link ends the walk.
+            Err(e) if e.is_connection_lost() => return Err(e),
+            Err(e) => errors.push(format!("{target}: {e}")),
         }
     }
 
@@ -848,9 +874,7 @@ async fn stage_file(
 ) -> Result<(), SftpError> {
     let mut remote_file = {
         let sftp = sftp_arc.lock().await;
-        sftp.open(remote_path)
-            .await
-            .map_err(|e| SftpError::RemoteIoError(e.to_string()))?
+        request(sftp.open(remote_path)).await?
     };
 
     let mut local_file = tokio::fs::File::create(local_path)
@@ -860,10 +884,8 @@ async fn stage_file(
     const CHUNK: usize = 32 * 1024; // 32 KB
     let mut buf = vec![0u8; CHUNK];
     loop {
-        let n = remote_file
-            .read(&mut buf)
-            .await
-            .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+        // Bounded: one read is one SFTP request, so a stall is a dead link.
+        let n = remote_io(remote_file.read(&mut buf)).await?;
         if n == 0 {
             break;
         }
@@ -876,10 +898,7 @@ async fn stage_file(
         .flush()
         .await
         .map_err(|e| SftpError::LocalIoError(e.to_string()))?;
-    remote_file
-        .shutdown()
-        .await
-        .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+    remote_io(remote_file.shutdown()).await?;
     Ok(())
 }
 
@@ -910,9 +929,7 @@ async fn stage_dir(
         // read_dir already skips "." and ".." entries internally.
         let entries = {
             let sftp = sftp_arc.lock().await;
-            sftp.read_dir(&rdir)
-                .await
-                .map_err(|e| SftpError::RemoteIoError(e.to_string()))?
+            request(sftp.read_dir(&rdir)).await?
         };
 
         for entry in entries {
@@ -964,9 +981,7 @@ async fn stage_entries(
     for remote_path in remote_paths {
         let attrs = {
             let sftp = sftp_arc.lock().await;
-            sftp.symlink_metadata(remote_path)
-                .await
-                .map_err(|e| SftpError::RemoteIoError(e.to_string()))?
+            request(sftp.symlink_metadata(remote_path)).await?
         };
 
         let file_type = attrs.file_type();
@@ -1146,16 +1161,10 @@ async fn download_task(
     let sftp = sftp_arc.lock().await;
 
     // Stat first to get the file size for progress reporting.
-    let attrs = sftp
-        .metadata(&remote_path)
-        .await
-        .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+    let attrs = request(sftp.metadata(&remote_path)).await?;
     let total_bytes = attrs.size.unwrap_or(0);
 
-    let mut remote_file = sftp
-        .open(&remote_path)
-        .await
-        .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+    let mut remote_file = request(sftp.open(&remote_path)).await?;
 
     // Release the mutex while doing the actual I/O so other SFTP operations
     // (like listing dirs in a different UI panel) are not blocked.
@@ -1176,10 +1185,7 @@ async fn download_task(
             return Err(SftpError::TransferCancelled);
         }
 
-        let n = remote_file
-            .read(&mut buf)
-            .await
-            .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+        let n = remote_io(remote_file.read(&mut buf)).await?;
         if n == 0 {
             break;
         }
@@ -1212,10 +1218,7 @@ async fn download_task(
         .map_err(|e| SftpError::LocalIoError(e.to_string()))?;
 
     // Properly close the remote file handle (shutdown sends SSH_FXP_CLOSE).
-    remote_file
-        .shutdown()
-        .await
-        .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+    remote_io(remote_file.shutdown()).await?;
 
     Ok(())
 }
@@ -1312,13 +1315,11 @@ async fn upload_task(
         .map_err(|e| SftpError::LocalIoError(e.to_string()))?;
 
     let sftp = sftp_arc.lock().await;
-    let mut remote_file = sftp
-        .open_with_flags(
-            &remote_path,
-            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
-        )
-        .await
-        .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+    let mut remote_file = request(sftp.open_with_flags(
+        &remote_path,
+        OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+    ))
+    .await?;
     // Release the SFTP session lock before doing I/O.
     drop(sftp);
 
@@ -1328,9 +1329,10 @@ async fn upload_task(
 
     loop {
         if token.is_cancelled() {
-            // Attempt to remove the partial remote file.
+            // Attempt to remove the partial remote file. Best-effort, but
+            // bounded — cancelling must not hang on an unresponsive server.
             let sftp = sftp_arc.lock().await;
-            let _ = sftp.remove_file(&remote_path).await;
+            let _ = request(sftp.remove_file(&remote_path)).await;
             return Err(SftpError::TransferCancelled);
         }
 
@@ -1342,10 +1344,7 @@ async fn upload_task(
             break;
         }
 
-        remote_file
-            .write_all(&buf[..n])
-            .await
-            .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+        remote_write_all(&mut remote_file, &buf[..n]).await?;
 
         bytes_transferred += n as u64;
 
@@ -1364,10 +1363,7 @@ async fn upload_task(
     }
 
     // Flush and close the remote file.
-    remote_file
-        .shutdown()
-        .await
-        .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+    remote_io(remote_file.shutdown()).await?;
 
     Ok(())
 }
@@ -1425,19 +1421,23 @@ pub async fn sftp_edit_external(
             .map_err(|e| SftpError::LocalIoError(e.to_string()))?;
     }
 
-    // 1. Download the file
+    // 1. Download the file. Read in chunks (not `read_to_end`) so each read is
+    //    one bounded SFTP request — a stall on a dead link fails fast and is
+    //    classified as connection-lost, instead of `read_to_end` inheriting a
+    //    single budget across the whole file.
     {
         let sftp = sftp_arc.lock().await;
-        let mut remote_file = sftp
-            .open(&remote_path)
-            .await
-            .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+        let mut remote_file = request(sftp.open(&remote_path)).await?;
 
         let mut contents = Vec::new();
-        remote_file
-            .read_to_end(&mut contents)
-            .await
-            .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+        let mut buf = vec![0u8; 32 * 1024];
+        loop {
+            let n = remote_io(remote_file.read(&mut buf)).await?;
+            if n == 0 {
+                break;
+            }
+            contents.extend_from_slice(&buf[..n]);
+        }
 
         tokio::fs::write(&local_path, &contents)
             .await
@@ -1524,17 +1524,14 @@ pub async fn sftp_edit_external(
                             rt.spawn(async move {
                                 let sftp = sftp_arc.lock().await;
                                 let result = async {
-                                    let mut remote_file = sftp
-                                        .open_with_flags(
-                                            &remote_path,
-                                            OpenFlags::CREATE
-                                                | OpenFlags::WRITE
-                                                | OpenFlags::TRUNCATE,
-                                        )
-                                        .await?;
-                                    remote_file.write_all(&contents).await?;
-                                    remote_file.flush().await?;
-                                    Ok::<(), russh_sftp::client::error::Error>(())
+                                    let mut remote_file = request(sftp.open_with_flags(
+                                        &remote_path,
+                                        OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::TRUNCATE,
+                                    ))
+                                    .await?;
+                                    remote_write_all(&mut remote_file, &contents).await?;
+                                    remote_io(remote_file.flush()).await?;
+                                    Ok::<(), SftpError>(())
                                 }
                                 .await;
 
@@ -1593,8 +1590,11 @@ async fn deduplicate_name(
         format!("{target_dir}/{name}")
     };
 
-    // Fast path: name is free
-    if sftp.metadata(&base_path).await.is_err() {
+    // Fast path: name is free. A dead link also lands here (every probe
+    // errors), which is harmless: the caller's `rename` immediately after is
+    // what surfaces the disconnect, and the loop below exits on the first probe
+    // rather than grinding through 999 timeouts.
+    if request(sftp.metadata(&base_path)).await.is_err() {
         return name.to_string();
     }
 
@@ -1616,7 +1616,7 @@ async fn deduplicate_name(
         } else {
             format!("{target_dir}/{candidate}")
         };
-        if sftp.metadata(&candidate_path).await.is_err() {
+        if request(sftp.metadata(&candidate_path)).await.is_err() {
             return candidate;
         }
     }
@@ -1631,40 +1631,28 @@ async fn copy_file_remote(
     src: &str,
     dst: &str,
 ) -> Result<(), SftpError> {
-    let mut reader = sftp
-        .open(src)
-        .await
-        .map_err(|e| SftpError::RemoteIoError(format!("Cannot open {src}: {e}")))?;
+    // Both ends are remote SFTP files, so every read and write is bounded and
+    // classified (a dead link → connection-lost, not a generic copy failure).
+    let mut reader = request(sftp.open(src)).await?;
 
-    let mut writer = sftp
-        .open_with_flags(
-            dst,
-            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
-        )
-        .await
-        .map_err(|e| SftpError::RemoteIoError(format!("Cannot create {dst}: {e}")))?;
+    let mut writer = request(sftp.open_with_flags(
+        dst,
+        OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+    ))
+    .await?;
 
     const CHUNK: usize = 32 * 1024;
     let mut buf = vec![0u8; CHUNK];
 
     loop {
-        let n = reader
-            .read(&mut buf)
-            .await
-            .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+        let n = remote_io(reader.read(&mut buf)).await?;
         if n == 0 {
             break;
         }
-        writer
-            .write_all(&buf[..n])
-            .await
-            .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+        remote_write_all(&mut writer, &buf[..n]).await?;
     }
 
-    writer
-        .shutdown()
-        .await
-        .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+    remote_io(writer.shutdown()).await?;
 
     Ok(())
 }
@@ -1677,10 +1665,7 @@ async fn copy_dir_remote(
 ) -> Result<(), SftpError> {
     mkdir_p(sftp, dst_dir).await?;
 
-    let entries = sftp
-        .read_dir(src_dir)
-        .await
-        .map_err(|e| SftpError::RemoteIoError(e.to_string()))?;
+    let entries = request(sftp.read_dir(src_dir)).await?;
 
     for entry in entries {
         let name = entry.file_name();
@@ -1752,9 +1737,16 @@ pub async fn sftp_move_entries(
             format!("{target_dir}/{deduped}")
         };
 
-        sftp.rename(source, &dest)
-            .await
-            .map_err(|e| SftpError::RemoteIoError(format!("Move failed: {e}")))?;
+        request(sftp.rename(source, &dest)).await.map_err(|e| {
+            // Keep the "Move failed" prefix, but preserve the kind: a rename
+            // that failed because the link died must stay connection-lost.
+            match e {
+                SftpError::RemoteIoError(msg) => {
+                    SftpError::RemoteIoError(format!("Move failed: {msg}"))
+                }
+                other => other,
+            }
+        })?;
 
         new_paths.push(dest);
     }
@@ -1796,10 +1788,7 @@ pub async fn sftp_copy_entries(
             format!("{target_dir}/{deduped}")
         };
 
-        let attrs = sftp
-            .metadata(source)
-            .await
-            .map_err(|e| SftpError::RemoteIoError(format!("Cannot stat {source}: {e}")))?;
+        let attrs = request(sftp.metadata(source)).await?;
 
         if attrs.file_type() == FileType::Dir {
             copy_dir_remote(&sftp, source, &dest).await?;
