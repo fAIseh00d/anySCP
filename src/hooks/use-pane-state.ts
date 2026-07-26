@@ -39,6 +39,7 @@ export function usePaneState(provider: FileSystemProvider): PaneState {
   const s3Session = useS3Store((s) => (isS3 ? s.sessions.get(id) : undefined));
   const s3Clipboard = useS3Store((s) => (isS3 ? s.clipboard : null));
   const localPane = useLocalStore((s) => (isLocal ? s.panes.get(id) : undefined));
+  const localClipboard = useLocalStore((s) => (isLocal ? s.clipboard : null));
 
   const sftp = useSftpStore.getState();
   const s3 = useS3Store.getState();
@@ -52,12 +53,12 @@ export function usePaneState(provider: FileSystemProvider): PaneState {
       error: localPane?.error ?? null,
       sortBy: localPane?.sortBy ?? "name",
       sortAsc: localPane?.sortAsc ?? true,
-      clipboard: null, // local has no copy/paste (canCopyPaste is off)
+      clipboard: localClipboard,
       setEntries: (path, entries) => local.setEntries(id, path, entries),
       setLoading: (loading) => local.setLoading(id, loading),
       setError: (error) => local.setError(id, error),
       setSort: (sortBy, sortAsc) => local.setSort(id, sortBy, sortAsc),
-      setClipboard: () => {},
+      setClipboard: (c) => local.setClipboard(c),
     };
   }
 

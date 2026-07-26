@@ -213,6 +213,9 @@ pub fn run() {
             local::commands::local_create_file,
             local::commands::local_delete,
             local::commands::local_rename,
+            local::commands::local_edit,
+            local::commands::local_copy,
+            local::commands::local_move,
             // SCP — session & filesystem (mirrors SFTP; used as a fallback
             // when the remote has the SFTP subsystem disabled)
             scp::commands::scp_open,

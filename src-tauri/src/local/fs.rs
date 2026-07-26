@@ -133,6 +133,165 @@ pub async fn rename(old_path: &str, new_path: &str) -> Result<(), LocalError> {
     Ok(())
 }
 
+/// Launch an external editor against a local file, in place. Unlike the remote
+/// `edit_external` flow there's nothing to stage or watch: the file is already
+/// local, so the editor's saves land on it directly. `launch` spawns the editor
+/// as a detached process and returns immediately.
+pub fn edit(path: &str, editor: Option<crate::editors::EditorConfig>) -> Result<(), LocalError> {
+    let p = Path::new(path);
+    if !p.is_file() {
+        return Err(LocalError::NotFound(path.to_string()));
+    }
+    let editor = editor.or_else(crate::editors::resolve_default).ok_or_else(|| {
+        LocalError::IoError("No editor found. Add one in Settings → Editors.".to_string())
+    })?;
+    crate::editors::launch(&editor, p).map_err(LocalError::IoError)?;
+    crate::telemetry::capture(
+        "edit_external",
+        serde_json::json!({ "source": "local", "editor": editor.name }),
+    );
+    Ok(())
+}
+
+/// Copy entries into `target_dir` under de-duplicated names (never clobbers).
+/// The recursive tree walk + byte copies run on a blocking thread. Returns the
+/// new paths.
+pub async fn copy_entries(
+    sources: Vec<String>,
+    target_dir: String,
+) -> Result<Vec<String>, LocalError> {
+    tokio::task::spawn_blocking(move || copy_entries_blocking(&sources, &target_dir))
+        .await
+        .map_err(|e| LocalError::IoError(format!("copy task failed: {e}")))?
+}
+
+/// Move entries into `target_dir`. Tries an atomic same-filesystem rename first
+/// and falls back to copy-then-delete across devices (rename → `EXDEV`). Names
+/// are de-duplicated so a move never clobbers.
+pub async fn move_entries(
+    sources: Vec<String>,
+    target_dir: String,
+) -> Result<Vec<String>, LocalError> {
+    tokio::task::spawn_blocking(move || move_entries_blocking(&sources, &target_dir))
+        .await
+        .map_err(|e| LocalError::IoError(format!("move task failed: {e}")))?
+}
+
+fn copy_entries_blocking(sources: &[String], target_dir: &str) -> Result<Vec<String>, LocalError> {
+    let target = Path::new(target_dir);
+    let mut new_paths = Vec::with_capacity(sources.len());
+    for source in sources {
+        let src = Path::new(source);
+        let name = entry_name(src, source)?;
+        reject_into_self(src, target, source)?;
+        let dest = target.join(deduplicate_name(target, &name));
+        copy_recursive(src, &dest)?;
+        new_paths.push(dest.to_string_lossy().into_owned());
+    }
+    Ok(new_paths)
+}
+
+fn move_entries_blocking(sources: &[String], target_dir: &str) -> Result<Vec<String>, LocalError> {
+    let target = Path::new(target_dir);
+    let mut new_paths = Vec::with_capacity(sources.len());
+    for source in sources {
+        let src = Path::new(source);
+        let name = entry_name(src, source)?;
+        reject_into_self(src, target, source)?;
+        let dest = target.join(deduplicate_name(target, &name));
+        match std::fs::rename(src, &dest) {
+            Ok(()) => {}
+            Err(e) if is_cross_device(&e) => {
+                copy_recursive(src, &dest)?;
+                remove_recursive(src)?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+        new_paths.push(dest.to_string_lossy().into_owned());
+    }
+    Ok(new_paths)
+}
+
+fn entry_name(src: &Path, raw: &str) -> Result<String, LocalError> {
+    src.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| LocalError::InvalidPath(raw.to_string()))
+}
+
+/// Refuse to copy/move a directory into itself or one of its descendants, which
+/// would recurse forever. `starts_with` is component-wise, so `/a/bc` is not
+/// treated as inside `/a/b`.
+fn reject_into_self(src: &Path, target: &Path, raw: &str) -> Result<(), LocalError> {
+    if target == src || target.starts_with(src) {
+        return Err(LocalError::InvalidPath(format!("Cannot move {raw} into itself")));
+    }
+    Ok(())
+}
+
+/// De-duplicate `name` in `target_dir`: "photo.jpg" → "photo (1).jpg" if taken,
+/// bumping the counter until free. Mirrors the remote `deduplicate_name`.
+fn deduplicate_name(target_dir: &Path, name: &str) -> String {
+    if !target_dir.join(name).exists() {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(pos) if pos > 0 => (&name[..pos], &name[pos..]),
+        _ => (name, ""),
+    };
+    for i in 1u32..1000 {
+        let candidate = format!("{stem} ({i}){ext}");
+        if !target_dir.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    format!("{stem} (copy){ext}")
+}
+
+/// Recursively copy `src` to `dst` (which must not exist). Symlinks are
+/// preserved on Unix rather than followed.
+fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let ty = std::fs::symlink_metadata(src)?.file_type();
+    if ty.is_symlink() {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::copy(src, dst)?;
+        }
+    } else if ty.is_dir() {
+        std::fs::create_dir(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_recursive(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+    } else {
+        std::fs::copy(src, dst)?;
+    }
+    Ok(())
+}
+
+fn remove_recursive(p: &Path) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(p)?.is_dir() {
+        std::fs::remove_dir_all(p)
+    } else {
+        std::fs::remove_file(p)
+    }
+}
+
+/// Whether a `rename` failed because source and destination live on different
+/// filesystems (the signal to fall back to copy-then-delete).
+fn is_cross_device(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    let expected = 18; // EXDEV
+    #[cfg(windows)]
+    let expected = 17; // ERROR_NOT_SAME_DEVICE
+    #[cfg(not(any(unix, windows)))]
+    let expected = -1;
+    e.raw_os_error() == Some(expected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

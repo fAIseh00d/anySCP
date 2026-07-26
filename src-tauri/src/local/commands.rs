@@ -37,3 +37,27 @@ pub async fn local_delete(path: String, is_dir: bool) -> Result<(), LocalError> 
 pub async fn local_rename(old_path: String, new_path: String) -> Result<(), LocalError> {
     super::rename(&old_path, &new_path).await
 }
+
+#[tauri::command]
+pub fn local_edit(
+    path: String,
+    editor: Option<crate::editors::EditorConfig>,
+) -> Result<(), LocalError> {
+    super::edit(&path, editor)
+}
+
+#[tauri::command]
+pub async fn local_copy(
+    source_paths: Vec<String>,
+    target_dir: String,
+) -> Result<Vec<String>, LocalError> {
+    super::copy_entries(source_paths, target_dir).await
+}
+
+#[tauri::command]
+pub async fn local_move(
+    source_paths: Vec<String>,
+    target_dir: String,
+) -> Result<Vec<String>, LocalError> {
+    super::move_entries(source_paths, target_dir).await
+}

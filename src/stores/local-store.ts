@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ExplorerEntry } from "../types/explorer";
+import type { ExplorerEntry, ExplorerClipboard } from "../types/explorer";
 
 type SortBy = "name" | "size" | "modified";
 
@@ -25,10 +25,14 @@ const EMPTY_PANE: LocalPane = {
 
 interface LocalState {
   panes: Map<string, LocalPane>;
+  /** Single copy/cut clipboard shared across local panes; paste is gated to the
+   *  pane that filled it via `sourceSessionId` (same as the sftp store). */
+  clipboard: ExplorerClipboard | null;
   setEntries: (paneKey: string, path: string, entries: ExplorerEntry[]) => void;
   setLoading: (paneKey: string, loading: boolean) => void;
   setError: (paneKey: string, error: string | null) => void;
   setSort: (paneKey: string, sortBy: SortBy, sortAsc: boolean) => void;
+  setClipboard: (clipboard: ExplorerClipboard | null) => void;
   closePane: (paneKey: string) => void;
 }
 
@@ -42,6 +46,7 @@ function patch(panes: Map<string, LocalPane>, key: string, p: Partial<LocalPane>
 
 export const useLocalStore = create<LocalState>((set) => ({
   panes: new Map(),
+  clipboard: null,
   // Like the sftp/s3 stores, a completed listing (or an error) also clears
   // `loading` — loadDirectory relies on that instead of a separate setLoading.
   setEntries: (paneKey, path, entries) =>
@@ -52,6 +57,7 @@ export const useLocalStore = create<LocalState>((set) => ({
     set((s) => ({ panes: patch(s.panes, paneKey, { error, loading: false }) })),
   setSort: (paneKey, sortBy, sortAsc) =>
     set((s) => ({ panes: patch(s.panes, paneKey, { sortBy, sortAsc }) })),
+  setClipboard: (clipboard) => set({ clipboard }),
   closePane: (paneKey) =>
     set((s) => {
       const next = new Map(s.panes);

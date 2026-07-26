@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { SftpEntry } from "../types/sftp";
 import type { ProviderCapabilities, FileSystemProvider } from "../types/explorer";
+import type { EditorConfig } from "../stores/settings-store";
 import { toExplorerEntry } from "./sftp-provider";
 
 // Local paths are native to the OS: `/` on Unix, `\` on Windows. `local_*`
@@ -8,14 +9,17 @@ import { toExplorerEntry } from "./sftp-provider";
 const SEP =
   typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent) ? "\\" : "/";
 
-// v1: browse + create/delete/rename only. Transfers are cross-pane (driven by
-// the remote provider), so canUpload/canDownload are off here; editor,
-// move/copy, and presign are future work.
+// Transfers are cross-pane (driven by the remote provider), so
+// canUpload/canDownload are off here; presign is S3-only.
 //
 // `hasPermissions` is on so the Unix mode column renders (the backend already
 // computes it; Windows reports 0 → a blank cell). It stays read-only: the
 // provider has no `chmod`, and Explorer only wires the edit path when the
 // provider actually implements it.
+//
+// `canEditInEditor` is on: a local file is edited in place (no download/watch
+// round-trip like the remote flow), so `editInEditor` just launches the editor
+// on the path.
 const LOCAL_CAPABILITIES: ProviderCapabilities = {
   canRename: true,
   canCreateFile: true,
@@ -24,9 +28,9 @@ const LOCAL_CAPABILITIES: ProviderCapabilities = {
   canUpload: false,
   canDownload: false,
   canDragDropUpload: false,
-  canInternalDragMove: false,
-  canCopyPaste: false,
-  canEditInEditor: false,
+  canInternalDragMove: true,
+  canCopyPaste: true,
+  canEditInEditor: true,
   canGetInfo: true,
   hasPermissions: true,
   hasStorageClass: false,
@@ -83,6 +87,15 @@ export function createLocalProvider(paneKey: string): FileSystemProvider {
     },
     rename(entry, newPath) {
       return invoke("local_rename", { oldPath: entry.id, newPath });
+    },
+    editInEditor(entry, editor: EditorConfig | null) {
+      return invoke("local_edit", { path: entry.id, editor });
+    },
+    move(sourceIds, targetDir) {
+      return invoke("local_move", { sourcePaths: sourceIds, targetDir });
+    },
+    copy(sourceIds, targetDir) {
+      return invoke("local_copy", { sourcePaths: sourceIds, targetDir });
     },
   };
 }

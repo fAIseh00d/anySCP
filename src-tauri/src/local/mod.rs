@@ -11,6 +11,8 @@ mod fs;
 mod platform;
 mod types;
 
-pub use fs::{create_file, delete, home_dir, list_dir, mkdir, rename};
+pub use fs::{
+    copy_entries, create_file, delete, edit, home_dir, list_dir, mkdir, move_entries, rename,
+};
 pub use platform::roots;
 pub use types::{LocalEntry, LocalError};
