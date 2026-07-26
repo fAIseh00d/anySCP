@@ -416,6 +416,25 @@ export function Explorer({
 
   const handleDragOut = useCallback((entries: ExplorerEntry[]) => {
     if (isDraggingOut.current || !provider.dragOut) return;
+    // SFTP/SCP drag-out must download every byte to a temp dir before the OS
+    // drag can begin (remote files aren't local). For a large file — or any
+    // directory, whose recursive size we can't know cheaply — that staging
+    // blocks well past the drag gesture and looks like a hang, so route those to
+    // the normal download flow (progress + cancel). Local drag-out streams the
+    // real on-disk paths with no staging, so it's never gated.
+    if (isSftpLike) {
+      const totalBytes = entries.reduce((sum, e) => sum + (e.size ?? 0), 0);
+      const hasDir = entries.some((e) => e.entryType === "Directory");
+      if (hasDir || totalBytes > DRAGOUT_STAGE_MAX_BYTES) {
+        toast.info("Large item — downloading to a folder you pick instead of drag-and-drop.");
+        const title =
+          entries.length === 1
+            ? `Download "${entries[0].name}" to…`
+            : `Download ${entries.length} items to…`;
+        void downloadInto(entries, title);
+        return;
+      }
+    }
     isDraggingOut.current = true;
     void (async () => {
       let prepToast: string | null = null;
@@ -431,7 +450,7 @@ export function Explorer({
         isDraggingOut.current = false;
       }
     })();
-  }, [provider]);
+  }, [provider, isSftpLike, downloadInto]);
 
   // ─── Upload (dialog) ─────────────────────────────────────────────────────
 
@@ -728,6 +747,14 @@ function errorMessage(err: unknown, fallback = "Unexpected error"): string {
 
 /** Path segment of our drag-out staging dir (temp_dir/anyscp-dragout/<uuid>). */
 const DRAGOUT_STAGING_SEGMENT = "anyscp-dragout";
+
+/** SFTP/SCP drag-out stages the whole selection to a temp dir before the OS drag
+ *  can start; above this size the wait outlasts the drag gesture and looks like a
+ *  hang, so we route to the download flow (with progress) instead. 5 MiB covers
+ *  most everyday files while staying snappy enough that the inline drag doesn't
+ *  read as frozen; the folder-picker fallback only kicks in for genuinely large
+ *  items where a visible progress bar is the better trade. */
+const DRAGOUT_STAGE_MAX_BYTES = 5 * 1024 * 1024; // 5 MiB
 
 function isWindowsWebview(): boolean {
   return typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent);
