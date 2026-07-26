@@ -598,6 +598,10 @@ export function ExplorerFileTable({
       const startY = e.clientY;
       let started = false;
       let moving = false;
+      // Tracks whether the cursor is currently over the sibling pane, so the
+      // ⌥-key handler (which has no pointer position) keeps the ghost on "copy"
+      // there — a cross-pane drop is always a transfer, never a move.
+      let overSibling = false;
 
       // Resolve the directory row under a point to a valid drop target id, or
       // null (not a dir, or dropping onto self / into the dragged subtree).
@@ -618,6 +622,17 @@ export function ExplorerFileTable({
         )
           return null;
         return target.id;
+      };
+
+      // Whether (x,y) is over the sibling pane — the cross-pane transfer drop
+      // zone. A drop there copies the selection into the other pane's cwd via
+      // the coordinator (local→remote upload, remote→local download).
+      const overSiblingPane = (x: number, y: number): boolean => {
+        if (!crossPane) return false;
+        const paneEl = (
+          document.elementFromPoint(x, y) as HTMLElement | null
+        )?.closest("[data-explorer-pane-key]") as HTMLElement | null;
+        return !!paneEl && paneEl.dataset.explorerPaneKey !== provider.sessionId;
       };
 
       // Hand off to the native OS download drag (only once).
@@ -653,12 +668,14 @@ export function ExplorerFileTable({
             dragOut();
             return;
           }
-          setDragOverId(folderTargetAt(ev.clientX, ev.clientY));
+          overSibling = overSiblingPane(ev.clientX, ev.clientY);
+          setDragOverId(overSibling ? null : folderTargetAt(ev.clientX, ev.clientY));
           setDragGhost({
             x: ev.clientX,
             y: ev.clientY,
             count: dragEntries.length,
-            copy: ev.altKey,
+            // A cross-pane drop is always a copy/transfer, regardless of Alt.
+            copy: ev.altKey || overSibling,
           });
         }
       };
@@ -672,18 +689,24 @@ export function ExplorerFileTable({
       // Reflect Alt (copy) the instant it's pressed/released, without waiting for
       // the next pointer move.
       const onKey = (ev: KeyboardEvent) => {
-        if (moving) setDragGhost((g) => (g ? { ...g, copy: ev.altKey } : g));
+        if (moving)
+          setDragGhost((g) => (g ? { ...g, copy: overSibling || ev.altKey } : g));
       };
 
       const onUp = (ev: PointerEvent) => {
         if (moving) {
-          const targetId = folderTargetAt(ev.clientX, ev.clientY);
-          if (targetId) {
-            const handler = ev.altKey ? onCopyEntries : onMoveEntries;
-            void handler?.(
-              dragEntries.map((s) => s.id),
-              targetId,
-            );
+          if (overSiblingPane(ev.clientX, ev.clientY)) {
+            // Dropped on the other pane → copy across (upload/download).
+            crossPane?.copyTo(dragEntries);
+          } else {
+            const targetId = folderTargetAt(ev.clientX, ev.clientY);
+            if (targetId) {
+              const handler = ev.altKey ? onCopyEntries : onMoveEntries;
+              void handler?.(
+                dragEntries.map((s) => s.id),
+                targetId,
+              );
+            }
           }
         }
         teardown();
@@ -710,6 +733,8 @@ export function ExplorerFileTable({
       onDragOut,
       onMoveEntries,
       onCopyEntries,
+      crossPane,
+      provider.sessionId,
       selectedIds,
       selectedEntries,
       entries,

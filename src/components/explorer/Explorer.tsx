@@ -555,7 +555,12 @@ export function Explorer({ provider, isActive = true, registerRuntime, crossPane
   const segments = provider.breadcrumbs(pane.currentPath);
 
   return (
-    <div className="flex flex-col h-full overflow-hidden relative">
+    <div
+      className="flex flex-col h-full overflow-hidden relative"
+      // Identifies this pane for cross-pane drag: a drop that lands over a
+      // sibling pane (different key) routes to the transfer coordinator.
+      data-explorer-pane-key={sessionId}
+    >
       <ExplorerToolbar
         provider={provider}
         currentPath={pane.currentPath}
