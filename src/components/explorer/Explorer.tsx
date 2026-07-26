@@ -4,7 +4,13 @@ import { AlertCircle } from "lucide-react";
 import { useSftpStore } from "../../stores/sftp-store";
 import { useTabStore } from "../../stores/tab-store";
 import { usePaneState } from "../../hooks/use-pane-state";
-import type { ExplorerEntry, ChmodResult, FileSystemProvider } from "../../types/explorer";
+import type {
+  ExplorerEntry,
+  ChmodResult,
+  FileSystemProvider,
+  PaneRuntime,
+  CrossPaneTarget,
+} from "../../types/explorer";
 import { ExplorerToolbar } from "./ExplorerToolbar";
 import { ExplorerFileTable } from "./ExplorerFileTable";
 import { ExplorerDropZone } from "./ExplorerDropZone";
@@ -20,6 +26,11 @@ interface ExplorerProps {
   /** Whether this explorer's tab is active/visible. Explorer tabs stay mounted
    *  (issue #17), so document-level listeners are gated to the active one. */
   isActive?: boolean;
+  /** Register this pane's runtime with the dual-pane coordinator so the sibling
+   *  pane can transfer files into it. Passed only in dual-pane mode. */
+  registerRuntime?: (runtime: PaneRuntime | null) => void;
+  /** The sibling pane, enabling "Copy to <sibling>" context actions. */
+  crossPane?: CrossPaneTarget;
 }
 
 /**
@@ -27,7 +38,7 @@ interface ExplorerProps {
  * per-pane browsing state comes from `usePaneState`. Backend-specific bits are
  * gated by capabilities or provider type (sudo → SFTP; presign → S3).
  */
-export function Explorer({ provider, isActive = true }: ExplorerProps) {
+export function Explorer({ provider, isActive = true, registerRuntime, crossPane }: ExplorerProps) {
   const sessionId = provider.sessionId;
   const caps = provider.capabilities;
   const isSftpLike = provider.type === "sftp" || provider.type === "scp";
@@ -317,6 +328,29 @@ export function Explorer({ provider, isActive = true }: ExplorerProps) {
     [downloadInto],
   );
 
+  // ─── Dual-pane coordinator registration ───────────────────────────────────
+  // Expose this pane's cwd + transfer entry points so the sibling pane can copy
+  // files across. Upload/download run on whichever pane's provider implements
+  // them (the local pane's provider implements neither, so it contributes only
+  // cwd + refresh; the remote SFTP pane does the actual transfer in both
+  // directions). Registers once per mount — cwd is read live from the ref.
+  useEffect(() => {
+    if (!registerRuntime) return;
+    const runtime: PaneRuntime = {
+      getCurrentPath: () => currentPathRef.current,
+      refresh: () => void loadDirectory(currentPathRef.current),
+      uploadInto: provider.enqueueUpload
+        ? (localPaths) => void startUpload(localPaths, currentPathRef.current)
+        : undefined,
+      downloadTo: provider.enqueueDownload
+        ? (entries, localDir) =>
+            void provider.enqueueDownload!(entries.map((e) => e.id), localDir)
+        : undefined,
+    };
+    registerRuntime(runtime);
+    return () => registerRuntime(null);
+  }, [registerRuntime, provider, startUpload, loadDirectory]);
+
   // ─── Drag-out (Explorer → OS) ───────────────────────────────────────────────
 
   const handleDragOut = useCallback((entries: ExplorerEntry[]) => {
@@ -575,6 +609,7 @@ export function Explorer({ provider, isActive = true }: ExplorerProps) {
         onMoveEntries={caps.canInternalDragMove ? handleMoveEntries : undefined}
         onCopyEntries={caps.canCopyPaste ? handleCopyEntries : undefined}
         onDragOut={provider.dragOut ? handleDragOut : undefined}
+        crossPane={crossPane}
         currentPath={pane.currentPath}
         loading={pane.loading}
         busy={busy}

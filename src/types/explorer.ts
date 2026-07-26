@@ -47,6 +47,36 @@ export interface ExplorerClipboard {
   sourceSessionId: string;
 }
 
+/**
+ * A handle the dual-pane container uses to drive one pane during a cross-pane
+ * transfer. Each `<Explorer>` registers one on mount; the sibling reads the
+ * target's cwd and calls its upload/download entry point.
+ */
+export interface PaneRuntime {
+  /** This pane's current directory — the destination when it's a transfer target. */
+  getCurrentPath(): string;
+  /** Reload this pane's listing. */
+  refresh(): void;
+  /** Upload local paths into this pane's current dir, through the same
+   *  conflict/overwrite guard as the toolbar upload. Present only on panes whose
+   *  provider can receive uploads (SFTP/SCP), absent on the local pane. */
+  uploadInto?(localPaths: string[]): void;
+  /** Download these entries from this pane into a local directory. Present only
+   *  on panes whose provider can produce downloads (SFTP/SCP). */
+  downloadTo?(entries: ExplorerEntry[], localDir: string): void;
+}
+
+/**
+ * Describes the sibling pane so a pane can offer a "Copy to <sibling>" action.
+ * Only wired for the local↔remote SFTP/SCP dual-pane.
+ */
+export interface CrossPaneTarget {
+  /** Label of the other pane (host name or "Local"). */
+  siblingLabel: string;
+  /** Copy the given entries into the sibling pane's current directory. */
+  copyTo(entries: ExplorerEntry[]): void;
+}
+
 /** Controls which UI elements and actions are available. */
 export interface ProviderCapabilities {
   canRename: boolean;

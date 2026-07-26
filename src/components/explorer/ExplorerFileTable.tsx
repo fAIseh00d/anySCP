@@ -25,6 +25,7 @@ import {
   Info,
   Link2,
   AlertTriangle,
+  ArrowRightLeft,
 } from "lucide-react";
 import { ModalShell, BTN_GHOST, BTN_DANGER } from "../shared/ModalShell";
 import type {
@@ -32,6 +33,7 @@ import type {
   ExplorerClipboard,
   FileSystemProvider,
   ChmodResult,
+  CrossPaneTarget,
 } from "../../types/explorer";
 import { ContextMenu } from "../shared/ContextMenu";
 import type { ContextMenuItem } from "../shared/ContextMenu";
@@ -87,6 +89,9 @@ interface ExplorerFileTableProps {
    *  elsewhere); a plain drag stays an in-app move. Absent for providers
    *  without OS drag-out support (e.g. SCP/S3). */
   onDragOut?: (entries: ExplorerEntry[]) => void;
+  /** Sibling pane in the dual-pane layout, enabling "Copy to <sibling>". Absent
+   *  in single-pane mode and for the S3 pane. */
+  crossPane?: CrossPaneTarget;
   /** Current directory path/prefix. Used to reset scroll on navigation while
    *  preserving it across same-directory refreshes (e.g. after a chmod). */
   currentPath?: string;
@@ -359,6 +364,7 @@ export function ExplorerFileTable({
   onMoveEntries,
   onCopyEntries,
   onDragOut,
+  crossPane,
   currentPath,
   loading,
 }: ExplorerFileTableProps) {
@@ -812,6 +818,13 @@ export function ExplorerFileTable({
           onClick: () => onDownloadMany(selectedEntries),
         });
       }
+      if (crossPane) {
+        items.push({
+          label: `Copy ${count} items to ${crossPane.siblingLabel}`,
+          icon: ArrowRightLeft,
+          onClick: () => crossPane.copyTo(selectedEntries),
+        });
+      }
       if (caps.canCopyPaste) {
         items.push({
           label: `Copy ${count} items`,
@@ -896,6 +909,14 @@ export function ExplorerFileTable({
           onClick: () => onDownload(entry),
         });
       }
+    }
+
+    if (crossPane) {
+      items.push({
+        label: `Copy to ${crossPane.siblingLabel}`,
+        icon: ArrowRightLeft,
+        onClick: () => crossPane.copyTo([entry]),
+      });
     }
 
     if (caps.canPresignUrl && entry.entryType === "File") {

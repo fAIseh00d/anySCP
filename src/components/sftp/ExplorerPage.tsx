@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FolderOpen, Cloud, HardDrive } from "lucide-react";
 import { Explorer } from "../explorer/Explorer";
 import { S3Explorer } from "../s3/S3Explorer";
@@ -10,6 +10,11 @@ import { useSettingsStore } from "../../stores/settings-store";
 import { WorkspaceArea } from "../workspace/WorkspaceArea";
 import type { Transport } from "../../lib/explorer-transport";
 import type { LayoutNode, PaneContent } from "../../types";
+import type {
+  ExplorerEntry,
+  PaneRuntime,
+  CrossPaneTarget,
+} from "../../types/explorer";
 
 interface ExplorerPageProps {
   /** SFTP/SCP transport session id (both live in the sftp store). */
@@ -94,6 +99,87 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
   const [ratio, setRatio] = useState(0.5);
   const [focusedId, setFocusedId] = useState(remoteId);
 
+  // ─── Cross-pane transfer coordinator ──────────────────────────────────────
+  // Both Explorers register a runtime here; a "Copy to <sibling>" action reads
+  // the target pane's cwd and drives the SFTP provider (which owns both
+  // upload and download). Only meaningful for the local↔SFTP/SCP dual-pane —
+  // the S3 pane uses a separate component and doesn't participate.
+  const crossPaneEnabled = dualPane && !!sftpProvider;
+  const runtimes = useRef<{ local: PaneRuntime | null; remote: PaneRuntime | null }>({
+    local: null,
+    remote: null,
+  });
+  const registerLocalRuntime = useCallback((rt: PaneRuntime | null) => {
+    runtimes.current.local = rt;
+  }, []);
+  const registerRemoteRuntime = useCallback((rt: PaneRuntime | null) => {
+    runtimes.current.remote = rt;
+  }, []);
+
+  const transferCopy = useCallback(
+    (fromRole: "local" | "remote", entries: ExplorerEntry[]) => {
+      if (entries.length === 0) return;
+      const { local, remote } = runtimes.current;
+      if (!local || !remote) return;
+      if (fromRole === "local") {
+        // local → remote: upload into the remote pane's current dir.
+        remote.uploadInto?.(entries.map((e) => e.id));
+      } else {
+        // remote → local: download into the local pane's current dir.
+        remote.downloadTo?.(entries, local.getCurrentPath());
+      }
+    },
+    [],
+  );
+
+  const localCrossPane = useMemo<CrossPaneTarget | undefined>(
+    () =>
+      crossPaneEnabled
+        ? { siblingLabel: label, copyTo: (entries) => transferCopy("local", entries) }
+        : undefined,
+    [crossPaneEnabled, label, transferCopy],
+  );
+  const remoteCrossPane = useMemo<CrossPaneTarget | undefined>(
+    () =>
+      crossPaneEnabled
+        ? { siblingLabel: "Local", copyTo: (entries) => transferCopy("remote", entries) }
+        : undefined,
+    [crossPaneEnabled, transferCopy],
+  );
+
+  // The remote pane self-refreshes on upload completion; downloads land in the
+  // local pane, whose provider emits no transfer events — so refresh it here
+  // when a download for this session finishes.
+  useEffect(() => {
+    if (!crossPaneEnabled || !sftpSessionId) return;
+    let aborted = false;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        if (aborted) return;
+        const unsub = await listen<Record<string, string>>("sftp:transfer", (event) => {
+          const p = event.payload;
+          if (
+            p.sftp_session_id === sftpSessionId &&
+            p.direction === "Download" &&
+            p.status === "Completed"
+          ) {
+            setTimeout(() => runtimes.current.local?.refresh(), 300);
+          }
+        });
+        if (aborted) unsub();
+        else unlisten = unsub;
+      } catch {
+        /* Not in a Tauri context */
+      }
+    })();
+    return () => {
+      aborted = true;
+      unlisten?.();
+    };
+  }, [crossPaneEnabled, sftpSessionId]);
+
   const remoteContent: PaneContent = sftpSessionId
     ? { kind: "sftp", sessionId: sftpSessionId, transport }
     : { kind: "s3", sessionId: s3SessionId ?? "" };
@@ -119,7 +205,14 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
     if (content.kind === "local") {
       return (
         <ExplorerPane icon={HardDrive} label="Local" transport="local" highlighted={highlighted} onActivate={onActivate}>
-          {localProvider && <Explorer provider={localProvider} isActive={paneActive} />}
+          {localProvider && (
+            <Explorer
+              provider={localProvider}
+              isActive={paneActive}
+              registerRuntime={registerLocalRuntime}
+              crossPane={localCrossPane}
+            />
+          )}
         </ExplorerPane>
       );
     }
@@ -133,7 +226,14 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
     if (content.kind === "sftp") {
       return (
         <ExplorerPane icon={FolderOpen} label={label} transport={content.transport} highlighted={highlighted} onActivate={onActivate}>
-          {sftpProvider && <Explorer provider={sftpProvider} isActive={paneActive} />}
+          {sftpProvider && (
+            <Explorer
+              provider={sftpProvider}
+              isActive={paneActive}
+              registerRuntime={registerRemoteRuntime}
+              crossPane={remoteCrossPane}
+            />
+          )}
         </ExplorerPane>
       );
     }
