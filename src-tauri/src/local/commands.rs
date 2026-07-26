@@ -54,6 +54,31 @@ pub async fn local_copy(
     super::copy_entries(source_paths, target_dir).await
 }
 
+/// Start a native OS drag-out of local files (drag to the desktop/Finder). The
+/// paths are already local — the pane just lists the local FS, which the
+/// frontend can already read/copy/delete — so they're handed to the OS drag in
+/// place, with no staging. Only paths that exist are dragged.
+#[tauri::command]
+pub async fn local_drag_out(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    paths: Vec<String>,
+) -> Result<crate::dragout::DragOutResult, LocalError> {
+    let files: Vec<std::path::PathBuf> = paths
+        .iter()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists())
+        .collect();
+    if files.is_empty() {
+        return Ok(crate::dragout::DragOutResult { dropped: false, count: 0 });
+    }
+    let count = files.len();
+    let dropped = crate::dragout::start_native_drag(app, window, files)
+        .await
+        .map_err(LocalError::IoError)?;
+    Ok(crate::dragout::DragOutResult { dropped, count })
+}
+
 #[tauri::command]
 pub async fn local_move(
     source_paths: Vec<String>,

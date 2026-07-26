@@ -1,6 +1,7 @@
 mod ai;
 mod backup;
 mod db;
+mod dragout;
 mod editors;
 mod import;
 mod local;
@@ -216,6 +217,7 @@ pub fn run() {
             local::commands::local_edit,
             local::commands::local_copy,
             local::commands::local_move,
+            local::commands::local_drag_out,
             // SCP — session & filesystem (mirrors SFTP; used as a fallback
             // when the remote has the SFTP subsystem disabled)
             scp::commands::scp_open,

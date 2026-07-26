@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { SftpEntry } from "../types/sftp";
-import type { ProviderCapabilities, FileSystemProvider } from "../types/explorer";
+import type { ProviderCapabilities, FileSystemProvider, DragOutResult } from "../types/explorer";
 import type { EditorConfig } from "../stores/settings-store";
 import { toExplorerEntry } from "./sftp-provider";
 
@@ -99,6 +99,11 @@ export function createLocalProvider(paneKey: string): FileSystemProvider {
     },
     copy(sourceIds, targetDir) {
       return invoke("local_copy", { sourcePaths: sourceIds, targetDir });
+    },
+    dragOut(entryIds) {
+      // Local files are already on disk, so the drag hands their real paths to
+      // the OS — no staging (unlike the SFTP provider's download-first dragOut).
+      return invoke<DragOutResult>("local_drag_out", { paths: entryIds });
     },
   };
 }
