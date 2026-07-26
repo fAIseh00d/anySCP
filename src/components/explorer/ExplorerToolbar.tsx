@@ -147,12 +147,19 @@ export const ExplorerToolbar = memo(function ExplorerToolbar({
     },
     [cancelEdit],
   );
-  const handleHome = useCallback(
-    () => onNavigate(providerType === "sftp" ? "/" : ""),
-    [onNavigate, providerType],
-  );
-  const isAtRoot =
-    providerType === "sftp" ? currentPath === "/" : currentPath === "";
+  // Home resolves the provider's real home directory (SFTP/local `~`, S3 root
+  // prefix) rather than a hardcoded root. The old literal sent local panes to
+  // "" — an invalid path that crashed the listing on macOS. On error, fall back
+  // to the provider's root so the button always does something sane.
+  const handleHome = useCallback(() => {
+    void (async () => {
+      try {
+        onNavigate(await provider.homeDir());
+      } catch {
+        onNavigate(providerType === "sftp" ? "/" : provider.rootLabel());
+      }
+    })();
+  }, [onNavigate, provider, providerType]);
 
   return (
     <div className="flex items-center h-10 px-2 border-b border-border bg-bg-surface shrink-0 gap-1 no-select">
@@ -160,9 +167,9 @@ export const ExplorerToolbar = memo(function ExplorerToolbar({
       <button
         data-testid="explorer-home"
         onClick={handleHome}
-        disabled={loading || isAtRoot}
-        title={`Go to ${provider.rootLabel()}`}
-        aria-label="Go to root"
+        disabled={loading}
+        title="Home"
+        aria-label="Go to home directory"
         className={ICON_BTN_CLASS}
       >
         <Home size={15} strokeWidth={1.8} aria-hidden="true" />
