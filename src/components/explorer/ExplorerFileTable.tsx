@@ -793,6 +793,17 @@ export function ExplorerFileTable({
     clipboard !== null &&
     clipboard.sourceSessionId === provider.sessionId;
 
+  // Open the inline new-file/new-folder row in THIS pane. The dispatch carries
+  // the pane key so a keyboard-invoked menu (or a future global hotkey) opens
+  // the row in the pane it targets, not merely whichever pane is focused.
+  const startCreate = (kind: "file" | "folder") => {
+    document.dispatchEvent(
+      new CustomEvent(`explorer:new-${kind}`, {
+        detail: { paneKey: provider.sessionId },
+      }),
+    );
+  };
+
   const buildMenuItems = (entry: ExplorerEntry | null): ContextMenuItem[] => {
     if (!entry) {
       const items: ContextMenuItem[] = [];
@@ -813,18 +824,14 @@ export function ExplorerFileTable({
         items.push({
           label: "New File",
           icon: File,
-          onClick: () =>
-            onCreateFile?.("") ||
-            document.dispatchEvent(new CustomEvent("explorer:new-file")),
+          onClick: () => startCreate("file"),
         });
       }
       if (caps.canCreateFolder) {
         items.push({
           label: "New Folder",
           icon: FolderPlus,
-          onClick: () =>
-            onCreateFolder?.("") ||
-            document.dispatchEvent(new CustomEvent("explorer:new-folder")),
+          onClick: () => startCreate("folder"),
         });
       }
       return items;
@@ -1190,9 +1197,7 @@ export function ExplorerFileTable({
             <div className="flex items-center gap-2">
               {caps.canCreateFile && (
                 <button
-                  onClick={() =>
-                    document.dispatchEvent(new CustomEvent("explorer:new-file"))
-                  }
+                  onClick={() => startCreate("file")}
                   className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[length:var(--text-xs)] font-medium text-text-muted hover:text-text-secondary hover:bg-bg-subtle transition-colors duration-[var(--duration-fast)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <FilePlus size={13} strokeWidth={2} aria-hidden="true" />
@@ -1201,11 +1206,7 @@ export function ExplorerFileTable({
               )}
               {caps.canCreateFolder && (
                 <button
-                  onClick={() =>
-                    document.dispatchEvent(
-                      new CustomEvent("explorer:new-folder"),
-                    )
-                  }
+                  onClick={() => startCreate("folder")}
                   className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[length:var(--text-xs)] font-medium text-text-muted hover:text-text-secondary hover:bg-bg-subtle transition-colors duration-[var(--duration-fast)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <FolderPlus size={13} strokeWidth={2} aria-hidden="true" />

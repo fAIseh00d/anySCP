@@ -23,9 +23,15 @@ import type { EditorConfig } from "../../stores/settings-store";
 interface ExplorerProps {
   /** The backend adapter — one container drives SFTP/SCP and S3 through it. */
   provider: FileSystemProvider;
-  /** Whether this explorer's tab is active/visible. Explorer tabs stay mounted
-   *  (issue #17), so document-level listeners are gated to the active one. */
+  /** Whether this pane is the active/focused one. Explorer tabs stay mounted
+   *  (issue #17), so document-level listeners are gated to the active one. In
+   *  dual-pane only the focused pane is active. */
   isActive?: boolean;
+  /** Whether this pane's TAB is visible (both panes of a dual-pane tab are
+   *  "tab-active" even though only one is focused). Gates the window-global OS
+   *  drop listener so the non-focused pane can still receive drops that land
+   *  over it. Defaults to `isActive` for single-pane callers. */
+  tabActive?: boolean;
   /** Register this pane's runtime with the dual-pane coordinator so the sibling
    *  pane can transfer files into it. Passed only in dual-pane mode. */
   registerRuntime?: (runtime: PaneRuntime | null) => void;
@@ -38,7 +44,16 @@ interface ExplorerProps {
  * per-pane browsing state comes from `usePaneState`. Backend-specific bits are
  * gated by capabilities or provider type (sudo → SFTP; presign → S3).
  */
-export function Explorer({ provider, isActive = true, registerRuntime, crossPane }: ExplorerProps) {
+export function Explorer({
+  provider,
+  isActive = true,
+  tabActive,
+  registerRuntime,
+  crossPane,
+}: ExplorerProps) {
+  // A dual-pane's non-focused pane is still tab-visible; single-pane callers
+  // that don't pass tabActive fall back to isActive.
+  const isTabActive = tabActive ?? isActive;
   const sessionId = provider.sessionId;
   const caps = provider.capabilities;
   const isSftpLike = provider.type === "sftp" || provider.type === "scp";
@@ -140,8 +155,45 @@ export function Explorer({ provider, isActive = true, registerRuntime, crossPane
     [pane.entries],
   );
 
+  // The OS drop event is window-global, so in a dual-pane both panes hear every
+  // drop. Each pane claims only the drops that land over its own DOM (tagged
+  // with data-explorer-pane-key) so files go to the pane you dropped on, not
+  // whichever happens to be focused. When the platform omits a position, fall
+  // back to the focused pane.
+  const isOverThisPane = useCallback(
+    (position?: { x: number; y: number }): boolean => {
+      if (!position) return isActive;
+      const scale = isWindowsWebview() ? window.devicePixelRatio || 1 : 1;
+      const el = document.elementFromPoint(position.x / scale, position.y / scale) as HTMLElement | null;
+      const paneEl = el?.closest("[data-explorer-pane-key]") as HTMLElement | null;
+      return paneEl?.dataset.explorerPaneKey === sessionId;
+    },
+    [isActive, sessionId],
+  );
+
+  // Perform an OS drop into `targetDir`: remote panes upload (with the
+  // conflict/overwrite guard); the local pane copies the dropped paths in place
+  // (they're already local), de-duping so nothing is clobbered. Returns true
+  // when the overwrite dialog is now in control (upload only).
+  const performDrop = useCallback(
+    async (localPaths: string[], targetDir: string): Promise<boolean> => {
+      if (provider.enqueueUpload) return startUpload(localPaths, targetDir);
+      if (provider.copy) {
+        try {
+          await provider.copy(localPaths, targetDir);
+          await loadDirectory(currentPathRef.current);
+        } catch (err) {
+          toast.error(`Copy failed: ${errorMessage(err)}`);
+        }
+      }
+      return false;
+    },
+    [provider, startUpload, loadDirectory],
+  );
+
   useEffect(() => {
-    if (!isActive || !caps.canDragDropUpload || !provider.enqueueUpload) return;
+    if (!isTabActive || !caps.canDragDropUpload) return;
+    if (!provider.enqueueUpload && !provider.copy) return;
 
     let aborted = false;
     let unlisten: (() => void) | undefined;
@@ -166,21 +218,30 @@ export function Explorer({ provider, isActive = true, registerRuntime, crossPane
         const unsub = await appWindow.onDragDropEvent((event: DragDropEventPayload) => {
           if (isDraggingOut.current) return;
           const type = event.payload?.type;
+          // Only claim events whose cursor is over THIS pane; otherwise make
+          // sure our own overlay is cleared (the sibling pane will show its own).
+          const overSelf = isOverThisPane(event.payload?.position);
           if (type === "enter" || type === "over") {
-            setIsDragOver(true);
-            setDropTargetDir(resolveDropDir(event.payload?.position));
+            if (overSelf) {
+              setIsDragOver(true);
+              setDropTargetDir(resolveDropDir(event.payload?.position));
+            } else {
+              setIsDragOver(false);
+              setDropTargetDir(null);
+            }
           } else if (type === "drop") {
             setIsDragOver(false);
             setDropTargetDir(null);
+            if (!overSelf) return;
             const paths: string[] = event.payload?.paths ?? [];
             if (paths.some((p) => p.includes(DRAGOUT_STAGING_SEGMENT))) return;
             if (isProcessingDrop.current || paths.length === 0) return;
             isProcessingDrop.current = true;
-            const remoteDir = resolveDropDir(event.payload?.position);
+            const targetDir = resolveDropDir(event.payload?.position);
 
-            void startUpload(paths, remoteDir).then((deferred) => {
+            void performDrop(paths, targetDir).then((deferred) => {
               // When deferred, the overwrite dialog owns the guard (reset by
-              // confirm/cancel); otherwise clear it once the upload is enqueued.
+              // confirm/cancel); otherwise clear it once the drop is handled.
               if (!deferred) setTimeout(() => { isProcessingDrop.current = false; }, 500);
             });
           } else {
@@ -195,7 +256,7 @@ export function Explorer({ provider, isActive = true, registerRuntime, crossPane
 
     return () => { aborted = true; unlisten?.(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, isActive, resolveDropDir, startUpload]);
+  }, [sessionId, isTabActive, isOverThisPane, resolveDropDir, performDrop]);
 
   // ─── Auto-refresh on upload completion ────────────────────────────────────
 
@@ -406,16 +467,25 @@ export function Explorer({ provider, isActive = true, registerRuntime, crossPane
   const [creatingFile, setCreatingFile] = useState(false);
 
   useEffect(() => {
-    if (!isActive) return;
-    const folderHandler = () => setCreatingFolder(true);
-    const fileHandler = () => setCreatingFile(true);
+    if (!isTabActive) return;
+    // A new-file/folder event targeted at a specific pane (detail.paneKey — the
+    // pane whose menu/button dispatched it) is claimed only by that pane; an
+    // untargeted event (e.g. a future global hotkey) falls back to the focused
+    // pane. This keeps the inline row in the pane you acted on, not merely the
+    // focused one.
+    const claims = (e: Event): boolean => {
+      const key = (e as CustomEvent<{ paneKey?: string }>).detail?.paneKey;
+      return key ? key === sessionId : isActive;
+    };
+    const folderHandler = (e: Event) => { if (claims(e)) setCreatingFolder(true); };
+    const fileHandler = (e: Event) => { if (claims(e)) setCreatingFile(true); };
     document.addEventListener("explorer:new-folder", folderHandler);
     document.addEventListener("explorer:new-file", fileHandler);
     return () => {
       document.removeEventListener("explorer:new-folder", folderHandler);
       document.removeEventListener("explorer:new-file", fileHandler);
     };
-  }, [isActive]);
+  }, [isTabActive, isActive, sessionId]);
 
   // Whether a same-dir name already exists in the current listing. Guards create
   // and rename against silent overwrites: `create_file` truncates and POSIX
@@ -624,6 +694,7 @@ export function Explorer({ provider, isActive = true, registerRuntime, crossPane
         <ExplorerDropZone
           path={dropTargetDir ?? pane.currentPath}
           intoFolder={!!dropTargetDir && dropTargetDir !== pane.currentPath}
+          action={provider.enqueueUpload ? "upload" : "copy"}
         />
       )}
 

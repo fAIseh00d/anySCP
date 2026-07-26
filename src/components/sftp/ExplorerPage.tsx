@@ -149,19 +149,22 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
 
   // The remote pane self-refreshes on upload completion; downloads land in the
   // local pane, whose provider emits no transfer events — so refresh it here
-  // when a download for this session finishes.
+  // when a download for this session finishes. The channel + id field track the
+  // transport, since an SCP-fallback remote emits `scp:transfer`/`scp_session_id`.
   useEffect(() => {
     if (!crossPaneEnabled || !sftpSessionId) return;
+    const channel = `${transport}:transfer`;
+    const idField = `${transport}_session_id`;
     let aborted = false;
     let unlisten: (() => void) | undefined;
     (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
         if (aborted) return;
-        const unsub = await listen<Record<string, string>>("sftp:transfer", (event) => {
+        const unsub = await listen<Record<string, string>>(channel, (event) => {
           const p = event.payload;
           if (
-            p.sftp_session_id === sftpSessionId &&
+            p[idField] === sftpSessionId &&
             p.direction === "Download" &&
             p.status === "Completed"
           ) {
@@ -178,7 +181,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
       aborted = true;
       unlisten?.();
     };
-  }, [crossPaneEnabled, sftpSessionId]);
+  }, [crossPaneEnabled, sftpSessionId, transport]);
 
   const remoteContent: PaneContent = sftpSessionId
     ? { kind: "sftp", sessionId: sftpSessionId, transport }
@@ -209,6 +212,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
             <Explorer
               provider={localProvider}
               isActive={paneActive}
+              tabActive={isActive}
               registerRuntime={registerLocalRuntime}
               crossPane={localCrossPane}
             />
@@ -230,6 +234,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
             <Explorer
               provider={sftpProvider}
               isActive={paneActive}
+              tabActive={isActive}
               registerRuntime={registerRemoteRuntime}
               crossPane={remoteCrossPane}
             />

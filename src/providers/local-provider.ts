@@ -27,7 +27,10 @@ const LOCAL_CAPABILITIES: ProviderCapabilities = {
   canDelete: true,
   canUpload: false,
   canDownload: false,
-  canDragDropUpload: false,
+  // Accepts OS file drops: the dropped paths are already local, so the pane
+  // copies them into the target dir (dedupes, never clobbers) rather than
+  // uploading.
+  canDragDropUpload: true,
   canInternalDragMove: true,
   canCopyPaste: true,
   canEditInEditor: true,
