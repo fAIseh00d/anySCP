@@ -563,7 +563,7 @@ export function Explorer({ provider, isActive = true }: ExplorerProps) {
         onDelete={handleDelete}
         onRename={caps.canRename ? handleRename : undefined}
         onEditInEditor={caps.canEditInEditor ? handleEditInEditor : undefined}
-        onApplyPermissions={caps.hasPermissions ? handleApplyPermissions : undefined}
+        onApplyPermissions={caps.hasPermissions && provider.chmod ? handleApplyPermissions : undefined}
         onPresignUrl={caps.canPresignUrl ? (entry) => void handlePresignUrl(entry) : undefined}
         creatingFile={creatingFile}
         onCreateFile={(name) => void handleCreateFile(name)}

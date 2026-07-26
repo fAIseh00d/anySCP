@@ -9,8 +9,13 @@ const SEP =
   typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent) ? "\\" : "/";
 
 // v1: browse + create/delete/rename only. Transfers are cross-pane (driven by
-// the remote provider), so canUpload/canDownload are off here; permissions,
-// editor, move/copy, and presign are future work.
+// the remote provider), so canUpload/canDownload are off here; editor,
+// move/copy, and presign are future work.
+//
+// `hasPermissions` is on so the Unix mode column renders (the backend already
+// computes it; Windows reports 0 → a blank cell). It stays read-only: the
+// provider has no `chmod`, and Explorer only wires the edit path when the
+// provider actually implements it.
 const LOCAL_CAPABILITIES: ProviderCapabilities = {
   canRename: true,
   canCreateFile: true,
@@ -23,7 +28,7 @@ const LOCAL_CAPABILITIES: ProviderCapabilities = {
   canCopyPaste: false,
   canEditInEditor: false,
   canGetInfo: true,
-  hasPermissions: false,
+  hasPermissions: true,
   hasStorageClass: false,
   canPresignUrl: false,
 };
