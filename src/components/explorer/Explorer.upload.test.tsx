@@ -102,6 +102,38 @@ describe("Explorer — upload button (SFTP)", () => {
     expect(enqueueCall()).toBeUndefined();
   });
 
+  it("opens the folder picker in directory mode and enqueues the selected folders", async () => {
+    dialogOpen.mockResolvedValue(["/local/projects", "/local/assets"]);
+
+    render(<Explorer provider={sftpProvider()} />);
+    fireEvent.click(await screen.findByTestId("explorer-upload-folder"));
+
+    await waitFor(() => expect(dialogOpen).toHaveBeenCalledTimes(1));
+    expect(dialogOpen).toHaveBeenCalledWith(
+      expect.objectContaining({ directory: true, multiple: true }),
+    );
+
+    // A picked folder rides the same enqueue path as files; the backend
+    // recreates it remotely and walks it recursively.
+    await waitFor(() => expect(enqueueCall()).toBeDefined());
+    expect(enqueueCall()?.[1]).toEqual({
+      sftpSessionId: SESSION_ID,
+      localPaths: ["/local/projects", "/local/assets"],
+      remoteDir: CURRENT_PATH,
+    });
+  });
+
+  it("enqueues nothing when the folder picker is cancelled", async () => {
+    dialogOpen.mockResolvedValue(null);
+
+    render(<Explorer provider={sftpProvider()} />);
+    fireEvent.click(await screen.findByTestId("explorer-upload-folder"));
+
+    await waitFor(() => expect(dialogOpen).toHaveBeenCalledTimes(1));
+    await Promise.resolve();
+    expect(enqueueCall()).toBeUndefined();
+  });
+
   it("pauses on the overwrite dialog when an uploaded name already exists", async () => {
     // The destination already contains dup.txt.
     invoke.mockImplementation(async (...args: unknown[]) =>
