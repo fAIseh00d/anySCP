@@ -130,32 +130,36 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
       fromRole: "local" | "remote",
       entries: ExplorerEntry[],
       onEnqueued?: (ids: string[]) => void,
+      // Destination dir override (a folder/".." the drop landed on); omitted =
+      // the destination pane's cwd.
+      targetDir?: string,
     ) => {
       if (entries.length === 0) return;
       const { local, remote } = runtimes.current;
       if (!local || !remote) return;
       if (fromRole === "local") {
-        // local → remote: upload into the remote pane's current dir (the remote
+        // local → remote: upload into the remote pane's target dir (the remote
         // pane's uploadInto runs its own overwrite guard).
-        remote.uploadInto?.(entries.map((e) => e.id), onEnqueued);
+        remote.uploadInto?.(entries.map((e) => e.id), onEnqueued, targetDir);
       } else {
         // remote → local: let the local pane guard against clobbering its own
         // files (same overwrite dialog as an upload), then download into it.
         const run = (localDir: string) => remote.downloadTo?.(entries, localDir, onEnqueued);
-        if (local.receiveDownload) local.receiveDownload(entries, run);
-        else run(local.getCurrentPath());
+        if (local.receiveDownload) local.receiveDownload(entries, run, targetDir);
+        else run(targetDir ?? local.getCurrentPath());
       }
     },
     [],
   );
 
   const transferCopy = useCallback(
-    (fromRole: "local" | "remote", entries: ExplorerEntry[]) => transfer(fromRole, entries),
+    (fromRole: "local" | "remote", entries: ExplorerEntry[], targetDir?: string) =>
+      transfer(fromRole, entries, undefined, targetDir),
     [transfer],
   );
 
   const transferMove = useCallback(
-    (fromRole: "local" | "remote", entries: ExplorerEntry[]) => {
+    (fromRole: "local" | "remote", entries: ExplorerEntry[], targetDir?: string) => {
       transfer(fromRole, entries, (ids) => {
         // ids[i] ↔ entries[i] (enqueue preserves order). If the backend returned
         // a different count we can't map ids→sources safely, so we skip the
@@ -165,7 +169,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
           return;
         }
         ids.forEach((id, i) => pendingMoves.current.set(id, { role: fromRole, entry: entries[i] }));
-      });
+      }, targetDir);
     },
     [transfer],
   );
@@ -209,8 +213,8 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
       crossPaneEnabled
         ? {
             siblingLabel: label,
-            copyTo: (entries) => transferCopy("local", entries),
-            moveTo: (entries) => transferMove("local", entries),
+            copyTo: (entries, targetDir) => transferCopy("local", entries, targetDir),
+            moveTo: (entries, targetDir) => transferMove("local", entries, targetDir),
             syncClipboard: (clip) => {
               crossClipboard.current = clip
                 ? { role: "local", operation: clip.operation, entries: clip.entries }
@@ -227,8 +231,8 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
       crossPaneEnabled
         ? {
             siblingLabel: "Local",
-            copyTo: (entries) => transferCopy("remote", entries),
-            moveTo: (entries) => transferMove("remote", entries),
+            copyTo: (entries, targetDir) => transferCopy("remote", entries, targetDir),
+            moveTo: (entries, targetDir) => transferMove("remote", entries, targetDir),
             syncClipboard: (clip) => {
               crossClipboard.current = clip
                 ? { role: "remote", operation: clip.operation, entries: clip.entries }

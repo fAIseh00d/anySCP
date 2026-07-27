@@ -139,8 +139,8 @@ export function Explorer({
   // dialog before letting the remote pane enqueue the download. `run` performs
   // the actual transfer into the resolved local dir.
   const receiveDownload = useCallback(
-    async (entries: ExplorerEntry[], run: (localDir: string) => void) => {
-      const localDir = currentPathRef.current;
+    async (entries: ExplorerEntry[], run: (localDir: string) => void, targetDir?: string) => {
+      const localDir = targetDir ?? currentPathRef.current;
       let conflicts: string[] = [];
       try {
         const existing = await provider.listDir(localDir);
@@ -434,7 +434,8 @@ export function Explorer({
       getCurrentPath: () => currentPathRef.current,
       refresh: () => void loadDirectory(currentPathRef.current),
       uploadInto: provider.enqueueUpload
-        ? (localPaths, onEnqueued) => void startUpload(localPaths, currentPathRef.current, onEnqueued)
+        ? (localPaths, onEnqueued, targetDir) =>
+            void startUpload(localPaths, targetDir ?? currentPathRef.current, onEnqueued)
         : undefined,
       downloadTo: provider.enqueueDownload
         ? (entries, localDir, onEnqueued) =>
@@ -443,7 +444,7 @@ export function Explorer({
               .then((ids) => onEnqueued?.(ids))
               .catch((err) => console.error("Download failed:", err))
         : undefined,
-      receiveDownload: (entries, run) => void receiveDownload(entries, run),
+      receiveDownload: (entries, run, targetDir) => void receiveDownload(entries, run, targetDir),
       remove: (entries) =>
         void (async () => {
           try {

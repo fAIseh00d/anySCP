@@ -26,6 +26,7 @@ import {
   Link2,
   AlertTriangle,
   ArrowRightLeft,
+  CornerLeftUp,
 } from "lucide-react";
 import { ModalShell, BTN_GHOST, BTN_DANGER } from "../shared/ModalShell";
 import type {
@@ -44,6 +45,7 @@ import {
 } from "../../stores/settings-store";
 import { isEditableInEditor } from "../../lib/file-types";
 import { closestAtPoint } from "../../lib/hit-test";
+import { useDragStore } from "../../stores/drag-store";
 import { FilePropertiesDialog } from "./FilePropertiesDialog";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -160,6 +162,12 @@ function octalMode(mode: number): string {
 //         hidden <24rem, shown ≥24rem.
 //   mode: octal (755 +x) — hidden <28rem, octal 28–42rem, full rwx ≥42rem.
 // Header and body cells share these so the columns stay aligned.
+// Sentinel selection id for the pinned ".." row, so single-click selects it
+// (visual feedback, like every other row) without it being a real entry —
+// `selectedEntries` filters against the listing, so this never leaks into
+// copy/cut/delete/download.
+const UP_ROW_ID = "\u0000parent";
+
 const COL_NAME = "flex-1 min-w-[7rem] truncate";
 const COL_MODIFIED = "hidden @sm:block w-20 shrink-0";
 const COL_PERMS = "hidden @md:block w-16 @2xl:w-28 shrink-0";
@@ -443,6 +451,12 @@ export function ExplorerFileTable({
   // enabled (for file-drop uploads), which suppresses HTML5 drag events in the
   // webview — so internal move/copy is driven by pointer events, not `draggable`.
   const [dragOverId, setDragOverId] = useState<string | null>(null);
+  // Highlight driven by a cross-pane drag happening in the OTHER pane: it targets
+  // a folder/".." in THIS pane, so we light that row up too. Only this pane's rows
+  // re-render (the selector returns null unless we're the drag's target pane).
+  const crossDragTargetId = useDragStore((s) =>
+    s.target?.paneKey === provider.sessionId ? s.target.entryId : null,
+  );
   const [dragGhost, setDragGhost] = useState<{
     x: number;
     y: number;
@@ -493,6 +507,12 @@ export function ExplorerFileTable({
   // Keyboard navigation walks this on every arrow keydown — derive it once per
   // sort change instead of rebuilding a fresh array per keypress.
   const sortedIds = useMemo(() => sortedEntries.map((en) => en.id), [sortedEntries]);
+
+  // Pinned ".." row: the collapsed path bar makes "go up" hard to reach, so
+  // offer the file-manager staple. Shown whenever a parent exists — at the root
+  // `parentPath` returns the path unchanged, so this is false there.
+  const parentDir = currentPath != null ? provider.parentPath(currentPath) : null;
+  const showUpRow = parentDir != null && parentDir !== currentPath;
 
   const handleSortClick = (col: "name" | "size" | "modified") => {
     if (sortBy === col) {
@@ -665,7 +685,10 @@ export function ExplorerFileTable({
       // null (not a dir, or dropping onto self / into the dragged subtree).
       const folderTargetAt = (x: number, y: number): string | null => {
         const row = closestAtPoint(x, y, "[data-entry-row]");
-        if (!row || row.dataset.entryType !== "Directory") return null;
+        if (!row) return null;
+        // Dropping onto the pinned ".." row moves/copies into the parent dir.
+        if (row.dataset.entryUp) return parentDir;
+        if (row.dataset.entryType !== "Directory") return null;
         const target = entries.find(
           (en) =>
             en.name === row.dataset.entryName && en.entryType === "Directory",
@@ -687,6 +710,26 @@ export function ExplorerFileTable({
         if (!crossPane) return false;
         const paneEl = closestAtPoint(x, y, "[data-explorer-pane-key]");
         return !!paneEl && paneEl.dataset.explorerPaneKey !== provider.sessionId;
+      };
+
+      // The folder/".." under the cursor in the SIBLING pane, as a destination dir
+      // (its data-entry-id) — so a cross-pane drop lands INSIDE that folder, not
+      // just the sibling's cwd. undefined = no folder under cursor → sibling cwd.
+      const siblingTargetDirAt = (x: number, y: number): string | undefined => {
+        const row = closestAtPoint(x, y, "[data-entry-row]");
+        if (!row) return undefined;
+        if (row.dataset.entryUp || row.dataset.entryType === "Directory") {
+          return row.dataset.entryId || undefined;
+        }
+        return undefined;
+      };
+      // Paint the sibling pane's hovered folder via the shared drag store (its
+      // own component owns the highlight; we can't reach its local state).
+      const paintSibling = (x: number, y: number): void => {
+        const paneEl = closestAtPoint(x, y, "[data-explorer-pane-key]");
+        const key = paneEl?.dataset.explorerPaneKey;
+        const dir = siblingTargetDirAt(x, y);
+        useDragStore.getState().setTarget(key && dir ? { paneKey: key, entryId: dir } : null);
       };
 
       // Hand off to the native OS download drag (only once).
@@ -723,7 +766,13 @@ export function ExplorerFileTable({
             return;
           }
           overSibling = overSiblingPane(ev.clientX, ev.clientY);
-          setDragOverId(overSibling ? null : folderTargetAt(ev.clientX, ev.clientY));
+          if (overSibling) {
+            setDragOverId(null);
+            paintSibling(ev.clientX, ev.clientY);
+          } else {
+            useDragStore.getState().setTarget(null);
+            setDragOverId(folderTargetAt(ev.clientX, ev.clientY));
+          }
           setDragGhost({
             x: ev.clientX,
             y: ev.clientY,
@@ -752,10 +801,12 @@ export function ExplorerFileTable({
       const onUp = (ev: PointerEvent) => {
         if (moving) {
           if (overSiblingPane(ev.clientX, ev.clientY)) {
-            // Dropped on the other pane → transfer across. ⌥ makes it a move
+            // Dropped on the other pane → transfer across, into the folder/".."
+            // under the cursor if any (else the sibling's cwd). ⌥ makes it a move
             // (source deleted once the transfer lands); plain drop copies.
-            if (ev.altKey) crossPane?.moveTo(dragEntries);
-            else crossPane?.copyTo(dragEntries);
+            const dir = siblingTargetDirAt(ev.clientX, ev.clientY);
+            if (ev.altKey) crossPane?.moveTo(dragEntries, dir);
+            else crossPane?.copyTo(dragEntries, dir);
           } else {
             const targetId = folderTargetAt(ev.clientX, ev.clientY);
             if (targetId) {
@@ -777,6 +828,7 @@ export function ExplorerFileTable({
         window.removeEventListener("keyup", onKey);
         document.removeEventListener("mouseleave", onWindowLeave);
         setDragOverId(null);
+        useDragStore.getState().setTarget(null);
         setDragGhost(null);
       }
 
@@ -792,6 +844,7 @@ export function ExplorerFileTable({
       onMoveEntries,
       onCopyEntries,
       crossPane,
+      parentDir,
       provider.sessionId,
       selectedIds,
       selectedEntries,
@@ -868,12 +921,12 @@ export function ExplorerFileTable({
       return true;
     }
     if (!caps.canCopyPaste) return false;
-    if (e.key === "c" && selectedIds.size > 0) {
+    if (e.key === "c" && selectedEntries.length > 0) {
       e.preventDefault();
       onSetClipboard({ entries: selectedEntries, operation: "copy", sourceSessionId: provider.sessionId });
       return true;
     }
-    if (e.key === "x" && selectedIds.size > 0) {
+    if (e.key === "x" && selectedEntries.length > 0) {
       e.preventDefault();
       onSetClipboard({ entries: selectedEntries, operation: "cut", sourceSessionId: provider.sessionId });
       return true;
@@ -1296,43 +1349,10 @@ export function ExplorerFileTable({
           />
         )}
 
-        {/* Rows */}
-        {sortedEntries.length === 0 && !creatingFolder && !creatingFile ? (
-          <div className="flex flex-col items-center justify-center flex-1 min-h-[200px] gap-3 py-12">
-            <Folder
-              size={30}
-              strokeWidth={1.2}
-              className="text-text-muted/30"
-              aria-hidden="true"
-            />
-            <p className="text-[length:var(--text-sm)] text-text-muted">
-              This folder is empty
-            </p>
-            <div className="flex items-center gap-2">
-              {caps.canCreateFile && (
-                <button
-                  onClick={() => startCreate("file")}
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[length:var(--text-xs)] font-medium text-text-muted hover:text-text-secondary hover:bg-bg-subtle transition-colors duration-[var(--duration-fast)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <FilePlus size={13} strokeWidth={2} aria-hidden="true" />
-                  New File
-                </button>
-              )}
-              {caps.canCreateFolder && (
-                <button
-                  onClick={() => startCreate("folder")}
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[length:var(--text-xs)] font-medium text-text-muted hover:text-text-secondary hover:bg-bg-subtle transition-colors duration-[var(--duration-fast)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <FolderPlus size={13} strokeWidth={2} aria-hidden="true" />
-                  New Folder
-                </button>
-              )}
-            </div>
-            <p className="text-[length:var(--text-2xs)] text-text-muted/60">
-              Right-click for more options
-            </p>
-          </div>
-        ) : (
+        {/* Rows — the ".." row (when not at root) is pinned above the listing so
+            it's reachable even in an empty folder, where the empty-state hint
+            still renders below it. */}
+        {(showUpRow || sortedEntries.length > 0) && (
           <div
             role="list"
             aria-label="Directory contents"
@@ -1342,6 +1362,41 @@ export function ExplorerFileTable({
                 handleContextMenu(e, null);
             }}
           >
+            {showUpRow && (
+              <div
+                role="listitem"
+                data-entry-row="true"
+                data-entry-up="true"
+                data-entry-id={parentDir ?? ""}
+                data-entry-type="Directory"
+                tabIndex={0}
+                aria-label="Parent directory"
+                title="Go to parent directory"
+                onClick={() => setSelectedIds(new Set([UP_ROW_ID]))}
+                onDoubleClick={() => onNavigate(parentDir!)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    onNavigate(parentDir!);
+                  }
+                }}
+                className={[
+                  "flex items-center gap-2 px-3 py-2 cursor-default select-none",
+                  "transition-colors duration-[var(--duration-fast)]",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+                  dragOverId === parentDir || crossDragTargetId === parentDir
+                    ? "ring-2 ring-accent bg-accent/10"
+                    : selectedIds.has(UP_ROW_ID)
+                      ? "bg-accent/10 text-text-primary"
+                      : "hover:bg-bg-subtle",
+                ].join(" ")}
+              >
+                <span className="w-5 flex items-center justify-center shrink-0">
+                  <CornerLeftUp size={16} strokeWidth={1.8} className="text-text-muted shrink-0" aria-hidden="true" />
+                </span>
+                <span className={`${COL_NAME} text-[length:var(--text-sm)] text-text-muted`}>..</span>
+              </div>
+            )}
             {sortedEntries.map((entry) => {
               const isSelected = selectedIds.has(entry.id);
               return (
@@ -1350,6 +1405,7 @@ export function ExplorerFileTable({
                   role="listitem"
                   data-entry-row="true"
                   data-entry-name={entry.name}
+                  data-entry-id={entry.id}
                   data-entry-type={entry.entryType}
                   data-testid={`explorer-entry-${entry.name}`}
                   tabIndex={0}
@@ -1410,7 +1466,7 @@ export function ExplorerFileTable({
                       caps.canDelete &&
                       !isInput
                     ) {
-                      if (selectedIds.size > 0)
+                      if (selectedEntries.length > 0)
                         setConfirmDelete(selectedEntries);
                     }
                     handleClipboardShortcut(e);
@@ -1432,7 +1488,7 @@ export function ExplorerFileTable({
                       ? "bg-accent/10 text-text-primary"
                       : "hover:bg-bg-subtle",
                     cutIds?.has(entry.id) ? "opacity-40" : "",
-                    dragOverId === entry.id
+                    dragOverId === entry.id || crossDragTargetId === entry.id
                       ? "ring-2 ring-accent bg-accent/10"
                       : "",
                   ].join(" ")}
@@ -1517,6 +1573,43 @@ export function ExplorerFileTable({
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {sortedEntries.length === 0 && !creatingFolder && !creatingFile && (
+          <div className="flex flex-col items-center justify-center min-h-[200px] gap-3 py-12">
+            <Folder
+              size={30}
+              strokeWidth={1.2}
+              className="text-text-muted/30"
+              aria-hidden="true"
+            />
+            <p className="text-[length:var(--text-sm)] text-text-muted">
+              This folder is empty
+            </p>
+            <div className="flex items-center gap-2">
+              {caps.canCreateFile && (
+                <button
+                  onClick={() => startCreate("file")}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[length:var(--text-xs)] font-medium text-text-muted hover:text-text-secondary hover:bg-bg-subtle transition-colors duration-[var(--duration-fast)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <FilePlus size={13} strokeWidth={2} aria-hidden="true" />
+                  New File
+                </button>
+              )}
+              {caps.canCreateFolder && (
+                <button
+                  onClick={() => startCreate("folder")}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[length:var(--text-xs)] font-medium text-text-muted hover:text-text-secondary hover:bg-bg-subtle transition-colors duration-[var(--duration-fast)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <FolderPlus size={13} strokeWidth={2} aria-hidden="true" />
+                  New Folder
+                </button>
+              )}
+            </div>
+            <p className="text-[length:var(--text-2xs)] text-text-muted/60">
+              Right-click for more options
+            </p>
           </div>
         )}
       </div>

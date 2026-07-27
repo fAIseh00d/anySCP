@@ -62,7 +62,7 @@ export interface PaneRuntime {
    *  provider can receive uploads (SFTP/SCP), absent on the local pane.
    *  `onEnqueued` reports the queued transfer ids (used by a move to delete the
    *  source once its transfer completes). */
-  uploadInto?(localPaths: string[], onEnqueued?: (transferIds: string[]) => void): void;
+  uploadInto?(localPaths: string[], onEnqueued?: (transferIds: string[]) => void, targetDir?: string): void;
   /** Download these entries from this pane into a local directory. Present only
    *  on panes whose provider can produce downloads (SFTP/SCP). `onEnqueued`
    *  reports the queued transfer ids. */
@@ -71,7 +71,7 @@ export interface PaneRuntime {
    *  overwrite pre-check against this pane's current dir, then invoke `run` with
    *  the resolved local dir to perform the transfer. The mirror of `uploadInto`'s
    *  built-in guard, for the download direction. */
-  receiveDownload?(entries: ExplorerEntry[], run: (localDir: string) => void): void;
+  receiveDownload?(entries: ExplorerEntry[], run: (localDir: string) => void, targetDir?: string): void;
   /** Delete these entries from this pane and refresh. Used to remove the source
    *  after a cross-pane MOVE's transfer completes. */
   remove?(entries: ExplorerEntry[]): void;
@@ -87,13 +87,14 @@ export interface PaneRuntime {
 export interface CrossPaneTarget {
   /** Label of the other pane (host name or "Local"). */
   siblingLabel: string;
-  /** Copy the given entries into the sibling pane's current directory. */
-  copyTo(entries: ExplorerEntry[]): void;
+  /** Copy the given entries into the sibling pane. `targetDir` overrides the
+   *  destination (a folder/".." the drop landed on); omitted = the sibling's cwd. */
+  copyTo(entries: ExplorerEntry[], targetDir?: string): void;
   /** Move the given entries into the sibling pane: transfer across, then delete
    *  each source only after ITS transfer reports Completed (never on a partial
    *  or failed transfer). Triggered by Alt+drag across panes and by a cut+paste
-   *  into the sibling. */
-  moveTo(entries: ExplorerEntry[]): void;
+   *  into the sibling. `targetDir` overrides the destination dir (drop-on-folder). */
+  moveTo(entries: ExplorerEntry[], targetDir?: string): void;
   /** Sync this pane's clipboard change into the shared cross-pane slot: a COPY
    *  becomes the pane's cross-pane offer; a CUT or clear (null) empties the slot,
    *  since cut is same-pane only (there is no cross-pane move) and must not let a
