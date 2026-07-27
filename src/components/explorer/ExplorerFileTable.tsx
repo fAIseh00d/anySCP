@@ -43,6 +43,7 @@ import {
   type EditorConfig,
 } from "../../stores/settings-store";
 import { isEditableInEditor } from "../../lib/file-types";
+import { closestAtPoint } from "../../lib/hit-test";
 import { FilePropertiesDialog } from "./FilePropertiesDialog";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -447,6 +448,9 @@ export function ExplorerFileTable({
     y: number;
     count: number;
     copy: boolean;
+    /** Cursor is over the sibling pane (a cross-pane transfer, not an in-pane
+     *  move) — changes the ghost label to name the destination. */
+    cross: boolean;
   } | null>(null);
 
   // Reset scroll to the top only when the directory actually changes. Same-dir
@@ -660,9 +664,7 @@ export function ExplorerFileTable({
       // Resolve the directory row under a point to a valid drop target id, or
       // null (not a dir, or dropping onto self / into the dragged subtree).
       const folderTargetAt = (x: number, y: number): string | null => {
-        const row = (
-          document.elementFromPoint(x, y) as HTMLElement | null
-        )?.closest("[data-entry-row]") as HTMLElement | null;
+        const row = closestAtPoint(x, y, "[data-entry-row]");
         if (!row || row.dataset.entryType !== "Directory") return null;
         const target = entries.find(
           (en) =>
@@ -683,9 +685,7 @@ export function ExplorerFileTable({
       // the coordinator (local→remote upload, remote→local download).
       const overSiblingPane = (x: number, y: number): boolean => {
         if (!crossPane) return false;
-        const paneEl = (
-          document.elementFromPoint(x, y) as HTMLElement | null
-        )?.closest("[data-explorer-pane-key]") as HTMLElement | null;
+        const paneEl = closestAtPoint(x, y, "[data-explorer-pane-key]");
         return !!paneEl && paneEl.dataset.explorerPaneKey !== provider.sessionId;
       };
 
@@ -728,8 +728,10 @@ export function ExplorerFileTable({
             x: ev.clientX,
             y: ev.clientY,
             count: dragEntries.length,
-            // A cross-pane drop is always a copy/transfer, regardless of Alt.
-            copy: ev.altKey || overSibling,
+            // Cross-pane: plain drop = copy, ⌥ = move. In-pane: plain = move,
+            // ⌥ = copy. So the sense of ⌥ flips depending on where you are.
+            copy: overSibling ? !ev.altKey : ev.altKey,
+            cross: overSibling,
           });
         }
       };
@@ -744,14 +746,16 @@ export function ExplorerFileTable({
       // the next pointer move.
       const onKey = (ev: KeyboardEvent) => {
         if (moving)
-          setDragGhost((g) => (g ? { ...g, copy: overSibling || ev.altKey } : g));
+          setDragGhost((g) => (g ? { ...g, copy: overSibling ? !ev.altKey : ev.altKey } : g));
       };
 
       const onUp = (ev: PointerEvent) => {
         if (moving) {
           if (overSiblingPane(ev.clientX, ev.clientY)) {
-            // Dropped on the other pane → copy across (upload/download).
-            crossPane?.copyTo(dragEntries);
+            // Dropped on the other pane → transfer across. ⌥ makes it a move
+            // (source deleted once the transfer lands); plain drop copies.
+            if (ev.altKey) crossPane?.moveTo(dragEntries);
+            else crossPane?.copyTo(dragEntries);
           } else {
             const targetId = folderTargetAt(ev.clientX, ev.clientY);
             if (targetId) {
@@ -842,10 +846,45 @@ export function ExplorerFileTable({
 
   // ─── Context menu items ───────────────────────────────────────────────────
 
-  const canPaste =
-    caps.canCopyPaste &&
-    clipboard !== null &&
-    clipboard.sourceSessionId === provider.sessionId;
+  // Paste is offered when this pane holds its own copy/cut, OR when the sibling
+  // pane holds the most-recent cross-pane copy. The sibling case reads a ref, so
+  // it's a fresh call at menu-open / keypress time rather than reactive state.
+  const canPaste = () =>
+    (caps.canCopyPaste &&
+      clipboard !== null &&
+      clipboard.sourceSessionId === provider.sessionId) ||
+    (crossPane?.hasSiblingClipboard() ?? false);
+
+  // Copy / cut / paste / select-all shortcuts, shared by the row handler (fires
+  // when a row is focused) and the scroll-container handler (fires when the pane
+  // is focused with no row — e.g. pasting into an empty target pane cross-pane).
+  // Returns true when it consumed the event.
+  const handleClipboardShortcut = (e: React.KeyboardEvent): boolean => {
+    if (!(e.metaKey || e.ctrlKey)) return false;
+    if ((e.target as Element).tagName === "INPUT") return false;
+    if (e.key === "a") {
+      e.preventDefault();
+      setSelectedIds(new Set(sortedEntries.map((en) => en.id)));
+      return true;
+    }
+    if (!caps.canCopyPaste) return false;
+    if (e.key === "c" && selectedIds.size > 0) {
+      e.preventDefault();
+      onSetClipboard({ entries: selectedEntries, operation: "copy", sourceSessionId: provider.sessionId });
+      return true;
+    }
+    if (e.key === "x" && selectedIds.size > 0) {
+      e.preventDefault();
+      onSetClipboard({ entries: selectedEntries, operation: "cut", sourceSessionId: provider.sessionId });
+      return true;
+    }
+    if (e.key === "v" && canPaste()) {
+      e.preventDefault();
+      onPaste?.();
+      return true;
+    }
+    return false;
+  };
 
   // Open the inline new-file/new-folder row in THIS pane. The dispatch carries
   // the pane key so a keyboard-invoked menu (or a future global hotkey) opens
@@ -861,7 +900,7 @@ export function ExplorerFileTable({
   const buildMenuItems = (entry: ExplorerEntry | null): ContextMenuItem[] => {
     if (!entry) {
       const items: ContextMenuItem[] = [];
-      if (canPaste) {
+      if (canPaste()) {
         items.push({
           label: "Paste",
           icon: ClipboardPaste,
@@ -932,7 +971,7 @@ export function ExplorerFileTable({
               sourceSessionId: provider.sessionId,
             }),
         });
-        if (canPaste) {
+        if (canPaste()) {
           items.push({
             label: "Paste",
             icon: ClipboardPaste,
@@ -1049,7 +1088,7 @@ export function ExplorerFileTable({
             sourceSessionId: provider.sessionId,
           }),
       });
-      if (canPaste) {
+      if (canPaste()) {
         items.push({
           label: "Paste",
           icon: ClipboardPaste,
@@ -1219,10 +1258,21 @@ export function ExplorerFileTable({
         ref={tableRef}
         // -scroll, not -auto: the header above reserves the scrollbar gutter,
         // so short listings would otherwise sit 6px left of their headers.
-        className={`flex-1 overflow-y-scroll overflow-x-hidden${dragGhost ? " select-none" : ""}`}
+        className={`flex-1 overflow-y-scroll overflow-x-hidden outline-none${dragGhost ? " select-none" : ""}`}
+        // Focusable so keyboard copy/cut/paste work when the pane has focus but
+        // no row does — e.g. a cross-pane ⌘V into an empty target pane. Only act
+        // on events targeting the container itself; row-focused events are
+        // handled by the row (and would otherwise double-fire as they bubble).
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.target === e.currentTarget) handleClipboardShortcut(e);
+        }}
         onClick={(e) => {
           const target = e.target as Element;
-          if (!target.closest("[data-entry-row]")) setSelectedIds(new Set());
+          if (!target.closest("[data-entry-row]")) {
+            setSelectedIds(new Set());
+            e.currentTarget.focus();
+          }
         }}
         onContextMenu={(e) => {
           const target = e.target as Element;
@@ -1363,44 +1413,7 @@ export function ExplorerFileTable({
                       if (selectedIds.size > 0)
                         setConfirmDelete(selectedEntries);
                     }
-                    if (!isInput && (e.metaKey || e.ctrlKey) && e.key === "a") {
-                      e.preventDefault();
-                      setSelectedIds(new Set(sortedEntries.map((en) => en.id)));
-                    }
-                    if (!isInput && caps.canCopyPaste) {
-                      if (
-                        (e.metaKey || e.ctrlKey) &&
-                        e.key === "c" &&
-                        selectedIds.size > 0
-                      ) {
-                        e.preventDefault();
-                        onSetClipboard({
-                          entries: selectedEntries,
-                          operation: "copy",
-                          sourceSessionId: provider.sessionId,
-                        });
-                      }
-                      if (
-                        (e.metaKey || e.ctrlKey) &&
-                        e.key === "x" &&
-                        selectedIds.size > 0
-                      ) {
-                        e.preventDefault();
-                        onSetClipboard({
-                          entries: selectedEntries,
-                          operation: "cut",
-                          sourceSessionId: provider.sessionId,
-                        });
-                      }
-                      if (
-                        (e.metaKey || e.ctrlKey) &&
-                        e.key === "v" &&
-                        canPaste
-                      ) {
-                        e.preventDefault();
-                        onPaste?.();
-                      }
-                    }
+                    handleClipboardShortcut(e);
                   }}
                   // Pointer-driven drag (HTML5 DnD is suppressed by the OS
                   // drag-drop handler). Drop on a folder = move (Alt = copy);
@@ -1536,15 +1549,20 @@ export function ExplorerFileTable({
         />
       )}
 
-      {/* Drag ghost for the pointer-driven move/copy, with an Alt=copy hint. */}
+      {/* Drag ghost for the pointer-driven move/copy. In-pane shows the ⌥=copy
+          hint; over the sibling pane it names the destination (⌥ there = move). */}
       {dragGhost && (
         <div
           className="fixed z-50 pointer-events-none rounded-md bg-accent px-2 py-1 text-[length:var(--text-2xs)] font-medium text-white shadow-[var(--shadow-md)]"
           style={{ left: dragGhost.x + 12, top: dragGhost.y + 8 }}
         >
-          {dragGhost.copy
-            ? `Copy ${dragGhost.count} ${dragGhost.count === 1 ? "item" : "items"}`
-            : `Move ${dragGhost.count} ${dragGhost.count === 1 ? "item" : "items"} · ⌥ to copy`}
+          {(() => {
+            const n = dragGhost.count;
+            const items = `${n} ${n === 1 ? "item" : "items"}`;
+            const verb = dragGhost.copy ? "Copy" : "Move";
+            if (dragGhost.cross) return `${verb} ${items} to ${crossPane?.siblingLabel ?? "other pane"}`;
+            return dragGhost.copy ? `Copy ${items}` : `Move ${items} · ⌥ to copy`;
+          })()}
         </div>
       )}
     </>

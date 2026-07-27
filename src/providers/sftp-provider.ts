@@ -115,10 +115,10 @@ export function createSftpProvider(
       return explorerInvoke(transport, "download", sessionId, { remotePath: entry.id, localPath });
     },
     enqueueDownload(entryIds, localDir) {
-      return explorerInvoke(transport, "enqueue_download", sessionId, { remotePaths: entryIds, localDir });
+      return explorerInvoke<string[]>(transport, "enqueue_download", sessionId, { remotePaths: entryIds, localDir });
     },
     enqueueUpload(localPaths, targetDir) {
-      return explorerInvoke(transport, "enqueue_upload", sessionId, { localPaths, remoteDir: targetDir });
+      return explorerInvoke<string[]>(transport, "enqueue_upload", sessionId, { localPaths, remoteDir: targetDir });
     },
   };
 }

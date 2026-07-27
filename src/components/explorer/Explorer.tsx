@@ -6,6 +6,7 @@ import { useTabStore } from "../../stores/tab-store";
 import { usePaneState } from "../../hooks/use-pane-state";
 import type {
   ExplorerEntry,
+  ExplorerClipboard,
   ChmodResult,
   FileSystemProvider,
   PaneRuntime,
@@ -16,6 +17,7 @@ import { ExplorerFileTable } from "./ExplorerFileTable";
 import { ExplorerDropZone } from "./ExplorerDropZone";
 import { DropOverwriteDialog } from "../sftp/DropOverwriteDialog";
 import { conflictingNames } from "../../lib/drop-conflicts";
+import { closestAtPoint } from "../../lib/hit-test";
 import { editorLaunchErrorMessage } from "../../lib/editor-errors";
 import { toast } from "../../stores/toast-store";
 import type { EditorConfig } from "../../stores/settings-store";
@@ -92,9 +94,10 @@ export function Explorer({
   const isDraggingOut = useRef(false);
 
   const uploadDropped = useCallback(
-    async (localPaths: string[], remoteDir: string) => {
+    async (localPaths: string[], remoteDir: string, onEnqueued?: (ids: string[]) => void) => {
       try {
-        await provider.enqueueUpload?.(localPaths, remoteDir);
+        const ids = await provider.enqueueUpload?.(localPaths, remoteDir);
+        if (ids) onEnqueued?.(ids);
       } catch (err) {
         toast.error(`Upload failed: ${errorMessage(err)}`);
       }
@@ -107,7 +110,7 @@ export function Explorer({
   // overwrite dialog (returning true) instead of silently clobbering; otherwise
   // it uploads. Works for every backend via `provider.listDir`.
   const startUpload = useCallback(
-    async (localPaths: string[], targetDir: string): Promise<boolean> => {
+    async (localPaths: string[], targetDir: string, onEnqueued?: (ids: string[]) => void): Promise<boolean> => {
       if (!provider.enqueueUpload || localPaths.length === 0) return false;
       let conflicts: string[] = [];
       try {
@@ -118,21 +121,49 @@ export function Explorer({
         // the upload proceed; a real failure surfaces in the transfer popover.
       }
       if (conflicts.length > 0) {
-        setPendingDrop({ localPaths, remoteDir: targetDir, conflicts });
+        setPendingDrop({
+          conflicts,
+          targetDir,
+          proceed: () => void uploadDropped(localPaths, targetDir, onEnqueued),
+        });
         return true;
       }
-      await uploadDropped(localPaths, targetDir);
+      await uploadDropped(localPaths, targetDir, onEnqueued);
       return false;
     },
     [provider, uploadDropped],
+  );
+
+  // remote → local cross-pane download: the local pane owns the destination, so
+  // it runs the same conflict pre-check as an upload and pauses on the overwrite
+  // dialog before letting the remote pane enqueue the download. `run` performs
+  // the actual transfer into the resolved local dir.
+  const receiveDownload = useCallback(
+    async (entries: ExplorerEntry[], run: (localDir: string) => void) => {
+      const localDir = currentPathRef.current;
+      let conflicts: string[] = [];
+      try {
+        const existing = await provider.listDir(localDir);
+        conflicts = conflictingNames(entries.map((e) => e.id), new Set(existing.map((e) => e.name)));
+      } catch {
+        // Can't read the local dir — skip the pre-check; a real failure surfaces
+        // in the transfer popover.
+      }
+      if (conflicts.length > 0) {
+        setPendingDrop({ conflicts, targetDir: localDir, proceed: () => run(localDir) });
+        return;
+      }
+      run(localDir);
+    },
+    [provider],
   );
 
   const confirmOverwrite = useCallback(() => {
     const pd = pendingDrop;
     setPendingDrop(null);
     isProcessingDrop.current = false;
-    if (pd) void uploadDropped(pd.localPaths, pd.remoteDir);
-  }, [pendingDrop, uploadDropped]);
+    pd?.proceed();
+  }, [pendingDrop]);
 
   const cancelOverwrite = useCallback(() => {
     setPendingDrop(null);
@@ -146,8 +177,7 @@ export function Explorer({
       const base = currentPathRef.current;
       if (!position) return base;
       const scale = isWindowsWebview() ? window.devicePixelRatio || 1 : 1;
-      const el = document.elementFromPoint(position.x / scale, position.y / scale);
-      const row = el?.closest("[data-entry-row]") as HTMLElement | null;
+      const row = closestAtPoint(position.x / scale, position.y / scale, "[data-entry-row]");
       if (row && row.dataset.entryType === "Directory") {
         const name = row.dataset.entryName;
         const target = pane.entries.find((e) => e.name === name && e.entryType === "Directory");
@@ -168,8 +198,7 @@ export function Explorer({
     (position?: { x: number; y: number }): boolean => {
       if (!position) return isActive;
       const scale = isWindowsWebview() ? window.devicePixelRatio || 1 : 1;
-      const el = document.elementFromPoint(position.x / scale, position.y / scale) as HTMLElement | null;
-      const paneEl = el?.closest("[data-explorer-pane-key]") as HTMLElement | null;
+      const paneEl = closestAtPoint(position.x / scale, position.y / scale, "[data-explorer-pane-key]");
       return paneEl?.dataset.explorerPaneKey === sessionId;
     },
     [isActive, sessionId],
@@ -405,16 +434,31 @@ export function Explorer({
       getCurrentPath: () => currentPathRef.current,
       refresh: () => void loadDirectory(currentPathRef.current),
       uploadInto: provider.enqueueUpload
-        ? (localPaths) => void startUpload(localPaths, currentPathRef.current)
+        ? (localPaths, onEnqueued) => void startUpload(localPaths, currentPathRef.current, onEnqueued)
         : undefined,
       downloadTo: provider.enqueueDownload
-        ? (entries, localDir) =>
-            void provider.enqueueDownload!(entries.map((e) => e.id), localDir)
+        ? (entries, localDir, onEnqueued) =>
+            void provider
+              .enqueueDownload!(entries.map((e) => e.id), localDir)
+              .then((ids) => onEnqueued?.(ids))
+              .catch((err) => console.error("Download failed:", err))
         : undefined,
+      receiveDownload: (entries, run) => void receiveDownload(entries, run),
+      remove: (entries) =>
+        void (async () => {
+          try {
+            for (const entry of entries) await provider.delete(entry);
+          } catch (err) {
+            pane.setError(err instanceof Error ? err.message : "Delete failed");
+          }
+          await loadDirectory(currentPathRef.current);
+        })(),
+      clearClipboard: () => pane.setClipboard(null),
     };
     registerRuntime(runtime);
     return () => registerRuntime(null);
-  }, [registerRuntime, provider, startUpload, loadDirectory]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [registerRuntime, provider, startUpload, loadDirectory, receiveDownload]);
 
   // ─── Drag-out (Explorer → OS) ───────────────────────────────────────────────
 
@@ -617,6 +661,9 @@ export function Explorer({
   }, [loadDirectory]);
 
   const handlePaste = useCallback(() => {
+    // Cross-pane paste: if the most-recent copy was in the sibling pane, pull it
+    // across (upload/download into this pane's cwd) instead of a same-pane copy.
+    if (crossPane?.pasteFromSibling()) return;
     const clip = pane.clipboard;
     if (!clip || clip.sourceSessionId !== sessionId) return;
     const sourceIds = clip.entries.map((e) => e.id);
@@ -629,7 +676,16 @@ export function Explorer({
       }
     }, "Paste failed");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider, sessionId, pane.clipboard, runBusy]);
+  }, [provider, sessionId, pane.clipboard, runBusy, crossPane]);
+
+  // Mirror every clipboard change into the shared cross-pane slot so a ⌘V in the
+  // sibling pane can pull a copy across; a cut/clear empties the shared slot
+  // (cut is same-pane only, and a stale copy must not hijack a later paste).
+  const handleSetClipboard = useCallback((c: ExplorerClipboard | null) => {
+    pane.setClipboard(c);
+    crossPane?.syncClipboard(c);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [crossPane]);
 
   const handleMoveEntries = useCallback(
     (sourceIds: string[], targetDir: string) =>
@@ -695,7 +751,7 @@ export function Explorer({
         sortAsc={pane.sortAsc}
         onSortChange={(sortBy, sortAsc) => pane.setSort(sortBy, sortAsc)}
         clipboard={pane.clipboard}
-        onSetClipboard={(c) => pane.setClipboard(c)}
+        onSetClipboard={handleSetClipboard}
         onNavigate={(path) => void loadDirectory(path)}
         onDownload={(entry) => void handleDownload(entry)}
         onDownloadMany={provider.enqueueDownload ? (entries) => void handleDownloadMany(entries) : undefined}
@@ -732,7 +788,7 @@ export function Explorer({
       {pendingDrop && (
         <DropOverwriteDialog
           conflicts={pendingDrop.conflicts}
-          targetDir={pendingDrop.remoteDir}
+          targetDir={pendingDrop.targetDir}
           onConfirm={confirmOverwrite}
           onCancel={cancelOverwrite}
         />
@@ -742,9 +798,11 @@ export function Explorer({
 }
 
 interface PendingDrop {
-  localPaths: string[];
-  remoteDir: string;
   conflicts: string[];
+  /** Destination directory shown in the dialog. */
+  targetDir: string;
+  /** Run the transfer the user confirmed (upload or cross-pane download). */
+  proceed: () => void;
 }
 
 /** Best-effort home dir (empty string on failure = list the provider root). */

@@ -116,35 +116,129 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
     runtimes.current.remote = rt;
   }, []);
 
-  const transferCopy = useCallback(
-    (fromRole: "local" | "remote", entries: ExplorerEntry[]) => {
+  // Pending source deletions for in-flight cross-pane MOVES, keyed by the queued
+  // transfer id. When that id's transfer reports Completed, the mapped source is
+  // deleted; on Failed/Cancelled it's dropped undeleted. This is what makes a
+  // move safe — the source only goes away once its transfer has actually landed.
+  const pendingMoves = useRef(new Map<string, { role: "local" | "remote"; entry: ExplorerEntry }>());
+
+  // Core cross-pane transfer (local↔remote), shared by copy and move. `onEnqueued`
+  // (move only) receives the queued transfer ids so the source can be deleted once
+  // each completes. Copy passes nothing, so no source is ever removed.
+  const transfer = useCallback(
+    (
+      fromRole: "local" | "remote",
+      entries: ExplorerEntry[],
+      onEnqueued?: (ids: string[]) => void,
+    ) => {
       if (entries.length === 0) return;
       const { local, remote } = runtimes.current;
       if (!local || !remote) return;
       if (fromRole === "local") {
-        // local → remote: upload into the remote pane's current dir.
-        remote.uploadInto?.(entries.map((e) => e.id));
+        // local → remote: upload into the remote pane's current dir (the remote
+        // pane's uploadInto runs its own overwrite guard).
+        remote.uploadInto?.(entries.map((e) => e.id), onEnqueued);
       } else {
-        // remote → local: download into the local pane's current dir.
-        remote.downloadTo?.(entries, local.getCurrentPath());
+        // remote → local: let the local pane guard against clobbering its own
+        // files (same overwrite dialog as an upload), then download into it.
+        const run = (localDir: string) => remote.downloadTo?.(entries, localDir, onEnqueued);
+        if (local.receiveDownload) local.receiveDownload(entries, run);
+        else run(local.getCurrentPath());
       }
     },
     [],
   );
 
+  const transferCopy = useCallback(
+    (fromRole: "local" | "remote", entries: ExplorerEntry[]) => transfer(fromRole, entries),
+    [transfer],
+  );
+
+  const transferMove = useCallback(
+    (fromRole: "local" | "remote", entries: ExplorerEntry[]) => {
+      transfer(fromRole, entries, (ids) => {
+        // ids[i] ↔ entries[i] (enqueue preserves order). If the backend returned
+        // a different count we can't map ids→sources safely, so we skip the
+        // auto-delete entirely: the move degrades to a copy, never a wrong delete.
+        if (ids.length !== entries.length) {
+          console.warn("cross-pane move: transfer id/entry count mismatch — leaving sources in place");
+          return;
+        }
+        ids.forEach((id, i) => pendingMoves.current.set(id, { role: fromRole, entry: entries[i] }));
+      });
+    },
+    [transfer],
+  );
+
+  // Shared cross-pane clipboard: the single most-recent clipboard action across
+  // both panes (copy OR cut), tagged with its source role. `syncClipboard` writes
+  // it on every copy/cut; each pane's `pasteFromSibling` reads it and, when the
+  // action came from the OTHER pane, drives a copy (copy) or a move (cut). Tracking
+  // cuts here — not just copies — is what stops a stale per-pane clipboard from
+  // hijacking a paste after a cut in the sibling.
+  const crossClipboard = useRef<
+    { role: "local" | "remote"; operation: "copy" | "cut"; entries: ExplorerEntry[] } | null
+  >(null);
+  const hasSiblingClipboard = useCallback(
+    (paneRole: "local" | "remote") => {
+      const clip = crossClipboard.current;
+      return !!clip && clip.role !== paneRole;
+    },
+    [],
+  );
+  const pasteFromSibling = useCallback(
+    (paneRole: "local" | "remote") => {
+      const clip = crossClipboard.current;
+      if (!clip || clip.role === paneRole) return false;
+      if (clip.operation === "cut") {
+        transferMove(clip.role, clip.entries);
+        crossClipboard.current = null; // a cut moves once, then it's spent
+        // Clear the source pane's own clipboard too, so a later same-pane paste
+        // there doesn't try to move the now-relocated files.
+        runtimes.current[clip.role]?.clearClipboard?.();
+      } else {
+        transferCopy(clip.role, clip.entries);
+      }
+      return true;
+    },
+    [transferCopy, transferMove],
+  );
+
   const localCrossPane = useMemo<CrossPaneTarget | undefined>(
     () =>
       crossPaneEnabled
-        ? { siblingLabel: label, copyTo: (entries) => transferCopy("local", entries) }
+        ? {
+            siblingLabel: label,
+            copyTo: (entries) => transferCopy("local", entries),
+            moveTo: (entries) => transferMove("local", entries),
+            syncClipboard: (clip) => {
+              crossClipboard.current = clip
+                ? { role: "local", operation: clip.operation, entries: clip.entries }
+                : null;
+            },
+            pasteFromSibling: () => pasteFromSibling("local"),
+            hasSiblingClipboard: () => hasSiblingClipboard("local"),
+          }
         : undefined,
-    [crossPaneEnabled, label, transferCopy],
+    [crossPaneEnabled, label, transferCopy, transferMove, pasteFromSibling, hasSiblingClipboard],
   );
   const remoteCrossPane = useMemo<CrossPaneTarget | undefined>(
     () =>
       crossPaneEnabled
-        ? { siblingLabel: "Local", copyTo: (entries) => transferCopy("remote", entries) }
+        ? {
+            siblingLabel: "Local",
+            copyTo: (entries) => transferCopy("remote", entries),
+            moveTo: (entries) => transferMove("remote", entries),
+            syncClipboard: (clip) => {
+              crossClipboard.current = clip
+                ? { role: "remote", operation: clip.operation, entries: clip.entries }
+                : null;
+            },
+            pasteFromSibling: () => pasteFromSibling("remote"),
+            hasSiblingClipboard: () => hasSiblingClipboard("remote"),
+          }
         : undefined,
-    [crossPaneEnabled, transferCopy],
+    [crossPaneEnabled, transferCopy, transferMove, pasteFromSibling, hasSiblingClipboard],
   );
 
   // The remote pane self-refreshes on upload completion; downloads land in the
@@ -161,13 +255,38 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
       try {
         const { listen } = await import("@tauri-apps/api/event");
         if (aborted) return;
-        const unsub = await listen<Record<string, string>>(channel, (event) => {
+        const unsub = await listen<{
+          transfer_id?: string;
+          direction?: string;
+          // Unit variants serialize as strings ("Completed", "Cancelled", …);
+          // the `Failed(String)` variant serializes as an object `{Failed: "…"}`.
+          status?: string | Record<string, unknown>;
+          [k: string]: unknown;
+        }>(channel, (event) => {
           const p = event.payload;
-          if (
-            p[idField] === sftpSessionId &&
-            p.direction === "Download" &&
-            p.status === "Completed"
-          ) {
+          if (p[idField] !== sftpSessionId) return;
+
+          const status = p.status;
+          const completed = status === "Completed";
+          // Terminal failure = "Cancelled" or the object form of `Failed(String)`.
+          const failed = status === "Cancelled" || (typeof status === "object" && status !== null);
+
+          // Cross-pane MOVE: once a tracked transfer lands, delete its source;
+          // if it failed or was cancelled, drop it undeleted (never lose data).
+          const id = typeof p.transfer_id === "string" ? p.transfer_id : undefined;
+          if (id && pendingMoves.current.has(id)) {
+            if (completed) {
+              const { role, entry } = pendingMoves.current.get(id)!;
+              pendingMoves.current.delete(id);
+              setTimeout(() => runtimes.current[role]?.remove?.([entry]), 300);
+            } else if (failed) {
+              pendingMoves.current.delete(id);
+            }
+          }
+
+          // Downloads land in the local pane, which emits no transfer events of
+          // its own — refresh it here when one for this session finishes.
+          if (p.direction === "Download" && completed) {
             setTimeout(() => runtimes.current.local?.refresh(), 300);
           }
         });

@@ -59,11 +59,25 @@ export interface PaneRuntime {
   refresh(): void;
   /** Upload local paths into this pane's current dir, through the same
    *  conflict/overwrite guard as the toolbar upload. Present only on panes whose
-   *  provider can receive uploads (SFTP/SCP), absent on the local pane. */
-  uploadInto?(localPaths: string[]): void;
+   *  provider can receive uploads (SFTP/SCP), absent on the local pane.
+   *  `onEnqueued` reports the queued transfer ids (used by a move to delete the
+   *  source once its transfer completes). */
+  uploadInto?(localPaths: string[], onEnqueued?: (transferIds: string[]) => void): void;
   /** Download these entries from this pane into a local directory. Present only
-   *  on panes whose provider can produce downloads (SFTP/SCP). */
-  downloadTo?(entries: ExplorerEntry[], localDir: string): void;
+   *  on panes whose provider can produce downloads (SFTP/SCP). `onEnqueued`
+   *  reports the queued transfer ids. */
+  downloadTo?(entries: ExplorerEntry[], localDir: string, onEnqueued?: (transferIds: string[]) => void): void;
+  /** Receive a cross-pane download INTO this pane: run the destination-side
+   *  overwrite pre-check against this pane's current dir, then invoke `run` with
+   *  the resolved local dir to perform the transfer. The mirror of `uploadInto`'s
+   *  built-in guard, for the download direction. */
+  receiveDownload?(entries: ExplorerEntry[], run: (localDir: string) => void): void;
+  /** Delete these entries from this pane and refresh. Used to remove the source
+   *  after a cross-pane MOVE's transfer completes. */
+  remove?(entries: ExplorerEntry[]): void;
+  /** Clear this pane's own copy/cut clipboard — used when its cut was consumed by
+   *  a cross-pane move, so a later same-pane paste doesn't act on moved sources. */
+  clearClipboard?(): void;
 }
 
 /**
@@ -75,6 +89,26 @@ export interface CrossPaneTarget {
   siblingLabel: string;
   /** Copy the given entries into the sibling pane's current directory. */
   copyTo(entries: ExplorerEntry[]): void;
+  /** Move the given entries into the sibling pane: transfer across, then delete
+   *  each source only after ITS transfer reports Completed (never on a partial
+   *  or failed transfer). Triggered by Alt+drag across panes and by a cut+paste
+   *  into the sibling. */
+  moveTo(entries: ExplorerEntry[]): void;
+  /** Sync this pane's clipboard change into the shared cross-pane slot: a COPY
+   *  becomes the pane's cross-pane offer; a CUT or clear (null) empties the slot,
+   *  since cut is same-pane only (there is no cross-pane move) and must not let a
+   *  stale earlier copy hijack a subsequent same-pane paste. */
+  syncClipboard(clip: ExplorerClipboard | null): void;
+  /** If the shared clipboard's most-recent copy came from the SIBLING pane,
+   *  transfer those entries into this pane's current dir and return true.
+   *  Returns false when the last copy was in this pane (or none), so the caller
+   *  falls through to the ordinary same-pane paste. */
+  pasteFromSibling(): boolean;
+  /** True when the shared clipboard's most-recent copy came from the SIBLING
+   *  pane — i.e. a cross-pane paste here would do something. Used to show the
+   *  "Paste" affordance in a pane whose own clipboard is empty. Read at
+   *  menu-open time; the shared slot is a ref, not reactive state. */
+  hasSiblingClipboard(): boolean;
 }
 
 /** Controls which UI elements and actions are available. */
@@ -151,7 +185,8 @@ export interface FileSystemProvider {
   /** Download one entry to an exact local path (save-as). */
   downloadAs?(entry: ExplorerEntry, localPath: string): Promise<void>;
   /** Download several entries into a local directory (through the queue). */
-  enqueueDownload?(entryIds: string[], localDir: string): Promise<void>;
-  /** Upload local paths into a target dir on this backend (through the queue). */
-  enqueueUpload?(localPaths: string[], targetDir: string): Promise<void>;
+  enqueueDownload?(entryIds: string[], localDir: string): Promise<string[]>;
+  /** Upload local paths into a target dir on this backend (through the queue).
+   *  Resolves with the queued transfer ids (one per top-level path, in order). */
+  enqueueUpload?(localPaths: string[], targetDir: string): Promise<string[]>;
 }
