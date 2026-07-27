@@ -767,7 +767,7 @@ export function Explorer({
         creatingFolder={creatingFolder}
         onCreateFolder={(name) => void handleCreateFolder(name)}
         onCancelCreateFolder={() => setCreatingFolder(false)}
-        onPaste={caps.canCopyPaste ? () => void handlePaste() : undefined}
+        onPaste={caps.canCopyPaste || crossPane ? () => void handlePaste() : undefined}
         onMoveEntries={caps.canInternalDragMove ? handleMoveEntries : undefined}
         onCopyEntries={caps.canCopyPaste ? handleCopyEntries : undefined}
         onDragOut={provider.dragOut ? handleDragOut : undefined}

@@ -102,5 +102,8 @@ export function createS3Provider(
     enqueueUpload(localPaths, targetDir) {
       return invoke<string[]>("s3_enqueue_upload", { s3SessionId: sessionId, localPaths, prefix: targetDir });
     },
+    enqueueDownload(entryIds, localDir) {
+      return invoke<string[]>("s3_enqueue_download", { s3SessionId: sessionId, keys: entryIds, localDir });
+    },
   };
 }

@@ -4,10 +4,18 @@ import { useS3Store } from "../../stores/s3-store";
 import type { S3BucketInfo } from "../../types";
 import { createS3Provider } from "../../providers/s3-provider";
 import { Explorer } from "../explorer/Explorer";
+import type { PaneRuntime, CrossPaneTarget } from "../../types/explorer";
 
 interface S3ExplorerProps {
   sessionId: string;
   isActive?: boolean;
+  /** Dual-pane coordinator props, threaded to the underlying Explorer so an S3
+   *  pane can take part in cross-pane transfer (upload/download) the same way an
+   *  SFTP pane does. Absent in single-pane. */
+  tabActive?: boolean;
+  registerRuntime?: (runtime: PaneRuntime | null) => void;
+  crossPane?: CrossPaneTarget;
+  dense?: boolean;
 }
 
 /**
@@ -15,7 +23,7 @@ interface S3ExplorerProps {
  * it lives here; once a bucket is active this delegates to the shared `Explorer`
  * with an S3 provider. Keeps the unified container backend-agnostic.
  */
-export function S3Explorer({ sessionId, isActive = true }: S3ExplorerProps) {
+export function S3Explorer({ sessionId, isActive = true, tabActive, registerRuntime, crossPane, dense }: S3ExplorerProps) {
   const session = useS3Store((s) => s.sessions.get(sessionId));
   const setBuckets = useS3Store((s) => s.setBuckets);
   const setCurrentBucket = useS3Store((s) => s.setCurrentBucket);
@@ -57,7 +65,17 @@ export function S3Explorer({ sessionId, isActive = true }: S3ExplorerProps) {
 
   if (session.currentBucket) {
     // Remount on bucket change so the listing reloads.
-    return <Explorer key={session.currentBucket} provider={provider} isActive={isActive} />;
+    return (
+      <Explorer
+        key={session.currentBucket}
+        provider={provider}
+        isActive={isActive}
+        tabActive={tabActive}
+        registerRuntime={registerRuntime}
+        crossPane={crossPane}
+        dense={dense}
+      />
+    );
   }
 
   return (

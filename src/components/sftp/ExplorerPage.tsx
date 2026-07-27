@@ -100,11 +100,12 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
   const [focusedId, setFocusedId] = useState(remoteId);
 
   // ─── Cross-pane transfer coordinator ──────────────────────────────────────
-  // Both Explorers register a runtime here; a "Copy to <sibling>" action reads
-  // the target pane's cwd and drives the SFTP provider (which owns both
-  // upload and download). Only meaningful for the local↔SFTP/SCP dual-pane —
-  // the S3 pane uses a separate component and doesn't participate.
-  const crossPaneEnabled = dualPane && !!sftpProvider;
+  // Both panes register a runtime here; the coordinator drives transfers by
+  // calling the destination runtime's upload/download entry points. Works for
+  // local↔SFTP/SCP AND local↔S3 — the coordinator is transport-agnostic (it only
+  // calls uploadInto/downloadTo). S3 can't move/copy in-pane, but cross-pane
+  // transfer is just upload/download, which it supports.
+  const crossPaneEnabled = dualPane && (!!sftpProvider || !!s3SessionId);
   const runtimes = useRef<{ local: PaneRuntime | null; remote: PaneRuntime | null }>({
     local: null,
     remote: null,
@@ -250,9 +251,12 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
   // when a download for this session finishes. The channel + id field track the
   // transport, since an SCP-fallback remote emits `scp:transfer`/`scp_session_id`.
   useEffect(() => {
-    if (!crossPaneEnabled || !sftpSessionId) return;
-    const channel = `${transport}:transfer`;
-    const idField = `${transport}_session_id`;
+    // The remote is either SFTP/SCP or S3; each emits on its own channel with its
+    // own session-id field. An SCP-fallback remote emits `scp:transfer`.
+    const remoteSessionId = sftpSessionId ?? s3SessionId;
+    if (!crossPaneEnabled || !remoteSessionId) return;
+    const channel = sftpSessionId ? `${transport}:transfer` : "s3:transfer";
+    const idField = sftpSessionId ? `${transport}_session_id` : "s3_session_id";
     let aborted = false;
     let unlisten: (() => void) | undefined;
     (async () => {
@@ -268,7 +272,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
           [k: string]: unknown;
         }>(channel, (event) => {
           const p = event.payload;
-          if (p[idField] !== sftpSessionId) return;
+          if (p[idField] !== remoteSessionId) return;
 
           const status = p.status;
           const completed = status === "Completed";
@@ -304,7 +308,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
       aborted = true;
       unlisten?.();
     };
-  }, [crossPaneEnabled, sftpSessionId, transport]);
+  }, [crossPaneEnabled, sftpSessionId, s3SessionId, transport]);
 
   const remoteContent: PaneContent = sftpSessionId
     ? { kind: "sftp", sessionId: sftpSessionId, transport }
@@ -347,7 +351,14 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
     if (content.kind === "s3") {
       return (
         <ExplorerPane icon={Cloud} label={label} transport="s3" highlighted={highlighted} onActivate={onActivate}>
-          <S3Explorer sessionId={content.sessionId} isActive={paneActive} />
+          <S3Explorer
+            sessionId={content.sessionId}
+            isActive={paneActive}
+            tabActive={isActive}
+            registerRuntime={registerRemoteRuntime}
+            crossPane={remoteCrossPane}
+            dense={dualPane}
+          />
         </ExplorerPane>
       );
     }

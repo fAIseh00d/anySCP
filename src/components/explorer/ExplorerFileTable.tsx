@@ -719,7 +719,10 @@ export function ExplorerFileTable({
         const row = closestAtPoint(x, y, "[data-entry-row]");
         if (!row) return undefined;
         if (row.dataset.entryUp || row.dataset.entryType === "Directory") {
-          return row.dataset.entryId || undefined;
+          // Return the id verbatim (not `|| undefined`): the S3 bucket root is the
+          // EMPTY prefix "", a valid target — treating "" as "no target" would
+          // send an S3 ".." drop to the current dir instead of the root.
+          return row.dataset.entryId;
         }
         return undefined;
       };
@@ -729,7 +732,8 @@ export function ExplorerFileTable({
         const paneEl = closestAtPoint(x, y, "[data-explorer-pane-key]");
         const key = paneEl?.dataset.explorerPaneKey;
         const dir = siblingTargetDirAt(x, y);
-        useDragStore.getState().setTarget(key && dir ? { paneKey: key, entryId: dir } : null);
+        // dir may legitimately be "" (S3 root), so test for undefined, not falsy.
+        useDragStore.getState().setTarget(key && dir !== undefined ? { paneKey: key, entryId: dir } : null);
       };
 
       // Hand off to the native OS download drag (only once).
@@ -920,7 +924,10 @@ export function ExplorerFileTable({
       setSelectedIds(new Set(sortedEntries.map((en) => en.id)));
       return true;
     }
-    if (!caps.canCopyPaste) return false;
+    // Same-pane copy/paste needs a provider that can copy/move; a cross-pane
+    // sibling (crossPane) enables the clipboard for transfer even when it can't
+    // (e.g. S3 — ⌘C/⌘X seed the shared clipboard, ⌘V pulls from the sibling).
+    if (!caps.canCopyPaste && !crossPane) return false;
     if (e.key === "c" && selectedEntries.length > 0) {
       e.preventDefault();
       onSetClipboard({ entries: selectedEntries, operation: "copy", sourceSessionId: provider.sessionId });
@@ -1003,7 +1010,7 @@ export function ExplorerFileTable({
           onClick: () => crossPane.copyTo(selectedEntries),
         });
       }
-      if (caps.canCopyPaste) {
+      if (caps.canCopyPaste || crossPane) {
         items.push({
           label: `Copy ${count} items`,
           icon: Copy,
