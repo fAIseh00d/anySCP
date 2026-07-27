@@ -37,6 +37,9 @@ interface ExplorerProps {
   registerRuntime?: (runtime: PaneRuntime | null) => void;
   /** The sibling pane, enabling "Copy to <sibling>" context actions. */
   crossPane?: CrossPaneTarget;
+  /** This pane is part of a split (dual-pane). Keeps the listing compact (short
+   *  date) since space is tight; a single pane can show the full date+time. */
+  dense?: boolean;
 }
 
 /**
@@ -50,6 +53,7 @@ export function Explorer({
   tabActive,
   registerRuntime,
   crossPane,
+  dense,
 }: ExplorerProps) {
   // A dual-pane's non-focused pane is still tab-visible; single-pane callers
   // that don't pass tabActive fall back to isActive.
@@ -645,7 +649,9 @@ export function Explorer({
 
   return (
     <div
-      className="flex flex-col h-full overflow-hidden relative"
+      // `@container`: the file table's columns respond to THIS pane's width (not
+      // the viewport), so a narrowed dual-pane minifies its own columns.
+      className="@container flex flex-col h-full overflow-hidden relative"
       // Identifies this pane for cross-pane drag: a drop that lands over a
       // sibling pane (different key) routes to the transfer coordinator.
       data-explorer-pane-key={sessionId}
@@ -673,7 +679,12 @@ export function Explorer({
           className="flex items-center gap-2.5 px-4 py-2.5 bg-status-error/10 border-b border-status-error/20 text-status-error"
         >
           <AlertCircle size={15} strokeWidth={2} aria-hidden="true" className="shrink-0" />
-          <p className="text-[length:var(--text-sm)]">{pane.error}</p>
+          {/* Single-line + truncate so a long message (e.g. "Remote I/O error:
+              connection closed") doesn't wrap and grow the banner in a narrow
+              pane; the full text is available on hover. */}
+          <p className="text-[length:var(--text-sm)] min-w-0 truncate" title={pane.error}>
+            {pane.error}
+          </p>
         </div>
       )}
 
@@ -707,6 +718,7 @@ export function Explorer({
         currentPath={pane.currentPath}
         loading={pane.loading}
         busy={busy}
+        dense={dense}
       />
 
       {isDragOver && (

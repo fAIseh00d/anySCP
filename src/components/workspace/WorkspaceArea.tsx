@@ -48,6 +48,10 @@ function WorkspaceSplit({
 }: WorkspaceAreaProps & { node: Extract<LayoutNode, { type: "split" }> }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const isHorizontal = node.direction === "horizontal";
+  // Width floor for side-by-side panes so a pane can't be dragged narrower than
+  // its full toolbar icon row (home + path + upload×2 + new×2 + refresh + sudo);
+  // vertical splits keep the shrink-to-fit min-w-0.
+  const paneMinClass = isHorizontal ? "min-w-[18rem]" : "min-w-0";
 
   // Latest ratio via ref so the drag callback never reads a stale closure.
   const ratioRef = useRef(node.ratio);
@@ -73,11 +77,13 @@ function WorkspaceSplit({
       data-zoomed={zoomed}
       className={`flex h-full w-full gap-0.5 overflow-visible ${isHorizontal ? "flex-row" : "flex-col"}`}
     >
-      <div style={{ flex: `${node.ratio} 1 0%` }} className="min-w-0 min-h-0 overflow-hidden">
+      {/* Horizontal splits get a width floor so a pane can't be dragged so
+          narrow its toolbar buttons vanish; vertical splits keep min-h-0. */}
+      <div style={{ flex: `${node.ratio} 1 0%` }} className={`${paneMinClass} min-h-0 overflow-hidden`}>
         <WorkspaceArea node={node.children[0]} path={[...path, 0]} tabId={tabId} zoomed={zoomed} setRatio={setRatio} renderPane={renderPane} />
       </div>
       {!zoomed && <SplitHandle direction={node.direction} onResize={handleResize} />}
-      <div style={{ flex: `${1 - node.ratio} 1 0%` }} className="min-w-0 min-h-0 overflow-hidden">
+      <div style={{ flex: `${1 - node.ratio} 1 0%` }} className={`${paneMinClass} min-h-0 overflow-hidden`}>
         <WorkspaceArea node={node.children[1]} path={[...path, 1]} tabId={tabId} zoomed={zoomed} setRatio={setRatio} renderPane={renderPane} />
       </div>
     </div>

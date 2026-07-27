@@ -97,6 +97,10 @@ interface ExplorerFileTableProps {
   currentPath?: string;
   loading?: boolean;
   busy?: boolean;
+  /** This pane is one of a split (dual-pane). Splits stay compact — short date
+   *  only — since space is tight and the filename matters most; a single pane
+   *  can expand to the full date+time when wide. */
+  dense?: boolean;
 }
 
 interface ContextMenuState {
@@ -125,6 +129,49 @@ function formatModified(unix: number | null): string {
   if (unix === null) return "—";
   const date = new Date(unix * 1000);
   return `${MODIFIED_DATE_FMT.format(date)} ${MODIFIED_TIME_FMT.format(date)}`;
+}
+
+// Compact, date-only timestamp for narrow panes (drops the time). `dateStyle:
+// "short"` yields the system locale's own canonical short date — e.g. 7/26/26
+// (en-US), 26.07.26 (de-DE), 2026/07/26 (ja-JP).
+const MODIFIED_SHORT_FMT = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "short",
+});
+function formatModifiedShort(unix: number | null): string {
+  if (unix === null) return "—";
+  return MODIFIED_SHORT_FMT.format(new Date(unix * 1000));
+}
+
+/** Compact octal mode for narrow panes, e.g. 0o644 → "644", 0o4755 → "4755". */
+function octalMode(mode: number): string {
+  return (mode & 0o7777).toString(8).padStart(3, "0");
+}
+
+// Responsive column classes (container queries — each pane is its own
+// @container). Name is the load-bearing column with a generous minimum
+// (COL_NAME); the others are fixed-width and simply SNAP show/hide (no
+// mid-resize shrinking, which looked janky). Thresholds are set so a column only
+// appears once there's room for it PLUS Name's 7rem minimum, so the row never
+// overflows/scrolls. Priority (most→least important): Name > Size > Date > Mode,
+// so when narrowing, Mode drops first and the Date persists:
+//   date: SHORT locale date only (12/3/24) — the full date+time was wider than
+//         the filename and obscured it; the timestamp is on hover instead.
+//         hidden <24rem, shown ≥24rem.
+//   mode: octal (755 +x) — hidden <28rem, octal 28–42rem, full rwx ≥42rem.
+// Header and body cells share these so the columns stay aligned.
+const COL_NAME = "flex-1 min-w-[7rem] truncate";
+const COL_MODIFIED = "hidden @sm:block w-20 shrink-0";
+const COL_PERMS = "hidden @md:block w-16 @2xl:w-28 shrink-0";
+
+/** Owner-execute bit — the "is this runnable" signal, shown as a +x badge on
+ *  files in the compact octal view (directories always have it, so it's noise
+ *  there). */
+function isExecutableFile(entry: ExplorerEntry): boolean {
+  return (
+    entry.entryType === "File" &&
+    entry.permissions != null &&
+    (entry.permissions & 0o100) !== 0
+  );
 }
 
 function EntryIcon({ entry }: { entry: ExplorerEntry }) {
@@ -367,7 +414,14 @@ export function ExplorerFileTable({
   crossPane,
   currentPath,
   loading,
+  dense,
 }: ExplorerFileTableProps) {
+  // Date column: split panes stay short; a single pane grows to the full
+  // date+time at ≥48rem (where Name still dominates). The header label and the
+  // body text switch at the same @3xl breakpoint.
+  const colDate = dense
+    ? COL_MODIFIED
+    : `${COL_MODIFIED} @3xl:w-52`;
   const caps = provider.capabilities;
   const editors = useSettingsStore((s) => s.editors);
   const defaultEditorId = useSettingsStore((s) => s.defaultEditorId);
@@ -1100,12 +1154,12 @@ export function ExplorerFileTable({
           rather than a child, so the scroller stays a direct flex child of the
           pane column and scrolls. The right padding reserves the scrollbar
           gutter so the columns line up with the rows beneath. */}
-      <div className="shrink-0 bg-bg-surface border-b border-border flex items-center gap-2 py-2 pl-3 pr-[calc(0.75rem+var(--scrollbar-size))]">
+      <div className="shrink-0 bg-bg-surface border-b border-border flex items-center gap-2 h-9 pl-3 pr-[calc(0.75rem+var(--scrollbar-size))] whitespace-nowrap">
         <span className="w-5 shrink-0" />
 
         <button
           data-testid="explorer-sort-name"
-          className={`flex-1 text-left ${thClass("name")}`}
+          className={`${COL_NAME} text-left ${thClass("name")}`}
           onClick={() => handleSortClick("name")}
           aria-sort={
             sortBy === "name" ? (sortAsc ? "ascending" : "descending") : "none"
@@ -1116,7 +1170,7 @@ export function ExplorerFileTable({
 
         <button
           data-testid="explorer-sort-size"
-          className={`w-20 text-right ${thClass("size")}`}
+          className={`w-20 text-right whitespace-nowrap ${thClass("size")}`}
           onClick={() => handleSortClick("size")}
           aria-sort={
             sortBy === "size" ? (sortAsc ? "ascending" : "descending") : "none"
@@ -1127,7 +1181,7 @@ export function ExplorerFileTable({
 
         <button
           data-testid="explorer-sort-modified"
-          className={`w-44 text-center ${thClass("modified")}`}
+          className={`${colDate} truncate text-center ${thClass("modified")}`}
           onClick={() => handleSortClick("modified")}
           aria-sort={
             sortBy === "modified"
@@ -1137,17 +1191,27 @@ export function ExplorerFileTable({
               : "none"
           }
         >
-          <SortArrow col="modified" gap="mr-0.5" /> Modified{" "}
+          <SortArrow col="modified" gap="mr-0.5" />{" "}
+          {dense ? (
+            "Date"
+          ) : (
+            <>
+              <span className="@3xl:hidden">Date</span>
+              <span className="hidden @3xl:inline">Modified</span>
+            </>
+          )}{" "}
           <SortArrow col={null} gap="ml-0.5" />
         </button>
 
-        {/* Last column: Permissions for SFTP, Class for S3 */}
-        <span className="w-24 text-[length:var(--text-xs)] font-semibold uppercase tracking-wide text-text-muted select-none">
-          {caps.hasPermissions
-            ? "Permissions"
-            : caps.hasStorageClass
-              ? "Class"
-              : ""}
+        {/* Last column: Permissions for SFTP, Class for S3 — minifies to "Mode"
+            (octal) on narrow panes. */}
+        <span className={`${COL_PERMS} text-[length:var(--text-xs)] font-semibold uppercase tracking-wide text-text-muted select-none truncate`}>
+          <span className="@2xl:hidden">
+            {caps.hasPermissions ? "Mode" : caps.hasStorageClass ? "Cls" : ""}
+          </span>
+          <span className="hidden @2xl:inline">
+            {caps.hasPermissions ? "Permissions" : caps.hasStorageClass ? "Class" : ""}
+          </span>
         </span>
       </div>
 
@@ -1155,7 +1219,7 @@ export function ExplorerFileTable({
         ref={tableRef}
         // -scroll, not -auto: the header above reserves the scrollbar gutter,
         // so short listings would otherwise sit 6px left of their headers.
-        className={`flex-1 overflow-y-scroll${dragGhost ? " select-none" : ""}`}
+        className={`flex-1 overflow-y-scroll overflow-x-hidden${dragGhost ? " select-none" : ""}`}
         onClick={(e) => {
           const target = e.target as Element;
           if (!target.closest("[data-entry-row]")) setSelectedIds(new Set());
@@ -1366,7 +1430,7 @@ export function ExplorerFileTable({
                   </span>
 
                   {/* Name — possibly in rename mode */}
-                  <span className="flex-1 min-w-0 text-[length:var(--text-sm)] text-text-primary truncate">
+                  <span className={`${COL_NAME} text-[length:var(--text-sm)] text-text-primary`}>
                     {caps.canRename && renamingId === entry.id && onRename ? (
                       <RenameRow
                         entry={entry}
@@ -1388,28 +1452,54 @@ export function ExplorerFileTable({
                   {/* Modified — centered so it doesn't crowd the right-aligned
                       Size on its left or leave dead space before Permissions;
                       12px because mono reads visually larger than the 14px sans.
-                      Truncate + title as a safety net for wide locales (#109). */}
+                      Truncate + title as a safety net for wide locales (#109).
+                      Narrow panes show a date-only short form, then hide it. */}
                   <span
-                    className="w-44 text-center text-[length:var(--text-xs)] text-text-muted shrink-0 font-mono tracking-tight truncate"
+                    className={`${colDate} text-center text-[length:var(--text-xs)] text-text-muted font-mono tracking-tight truncate`}
                     title={formatModified(entry.modified)}
                   >
-                    {formatModified(entry.modified)}
+                    {dense ? (
+                      formatModifiedShort(entry.modified)
+                    ) : (
+                      <>
+                        <span className="@3xl:hidden">{formatModifiedShort(entry.modified)}</span>
+                        <span className="hidden @3xl:inline">{formatModified(entry.modified)}</span>
+                      </>
+                    )}
                   </span>
 
-                  {/* Permissions / Storage Class */}
+                  {/* Permissions / Storage Class — narrow panes collapse the rwx
+                      string to octal (e.g. drwxr-xr-x → 755). */}
                   <span
                     data-entry-perms={
                       caps.hasPermissions
                         ? (entry.permissionsDisplay ?? "")
                         : undefined
                     }
-                    className="w-24 font-mono text-[length:var(--text-xs)] text-text-muted shrink-0 tracking-tight whitespace-nowrap"
+                    title={
+                      caps.hasPermissions
+                        ? (entry.permissionsDisplay ?? undefined)
+                        : undefined
+                    }
+                    className={`${COL_PERMS} font-mono text-[length:var(--text-xs)] text-text-muted tracking-tight truncate`}
                   >
-                    {caps.hasPermissions
-                      ? (entry.permissionsDisplay ?? "")
-                      : caps.hasStorageClass
-                        ? (entry.storageClass ?? "—")
-                        : ""}
+                    {caps.hasPermissions ? (
+                      <>
+                        <span className="@2xl:hidden">
+                          {entry.permissions ? octalMode(entry.permissions) : ""}
+                          {isExecutableFile(entry) && (
+                            <span className="ml-0.5 text-accent font-semibold">+x</span>
+                          )}
+                        </span>
+                        <span className="hidden @2xl:inline">
+                          {entry.permissionsDisplay ?? ""}
+                        </span>
+                      </>
+                    ) : caps.hasStorageClass ? (
+                      (entry.storageClass ?? "—")
+                    ) : (
+                      ""
+                    )}
                   </span>
                 </div>
               );

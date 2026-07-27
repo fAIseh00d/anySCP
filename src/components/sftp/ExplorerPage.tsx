@@ -215,6 +215,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
               tabActive={isActive}
               registerRuntime={registerLocalRuntime}
               crossPane={localCrossPane}
+              dense={dualPane}
             />
           )}
         </ExplorerPane>
@@ -237,6 +238,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
               tabActive={isActive}
               registerRuntime={registerRemoteRuntime}
               crossPane={remoteCrossPane}
+              dense={dualPane}
             />
           )}
         </ExplorerPane>
