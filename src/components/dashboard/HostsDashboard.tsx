@@ -57,7 +57,7 @@ async function cancelConnectAttempt(attemptId: string) {
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export function HostsDashboard() {
-  const { hosts, loadHosts, recentConnections, loadRecent, saveHost, deleteHost, reorderHosts } =
+  const { hosts, loadHosts, recentConnections, loadRecent, duplicateHost, deleteHost, reorderHosts } =
     useHostsStore();
   const { groups, loadGroups, createGroup, deleteGroup, reorderGroups } = useGroupsStore();
   const setEditingHostId = useUiStore((s) => s.setEditingHostId);
@@ -367,21 +367,14 @@ export function HostsDashboard() {
   );
 
   const handleDuplicateHost = useCallback(
+    // Delegate to the store, which builds the copy row AND calls the backend
+    // `duplicate_host` command so the source's keychain secret is copied under
+    // the new id. Inlining `saveHost` here (the old path) skipped that, so a
+    // duplicated password/passphrase host couldn't authenticate.
     async (host: SavedHost) => {
-      const now = new Date().toISOString();
-      const duplicate: SavedHost = {
-        ...host,
-        id: crypto.randomUUID(),
-        label: `${host.label || host.host} (copy)`,
-        created_at: now,
-        updated_at: now,
-        last_connected_at: null,
-        connection_count: null,
-      };
-      await saveHost(duplicate);
-      // saveHost already reloads the hosts list in the store
+      await duplicateHost(host.id);
     },
-    [saveHost],
+    [duplicateHost],
   );
 
   // ─── Drag-and-drop reordering ────────────────────────────────────────────────

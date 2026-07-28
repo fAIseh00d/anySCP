@@ -1149,20 +1149,29 @@ impl HostDb {
         Ok(())
     }
 
-    /// Delete a group and ALL hosts that belong to it.
+    /// Delete a group and ALL hosts that belong to it. Returns the ids of the
+    /// deleted hosts so the caller can purge their keychain secrets (the DB
+    /// layer never touches the vault).
     #[instrument(skip(self), fields(id = %id))]
-    pub fn delete_group_with_hosts(&self, id: &str) -> Result<(), DbError> {
+    pub fn delete_group_with_hosts(&self, id: &str) -> Result<Vec<String>, DbError> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| DbError::InitError(format!("db lock poisoned: {e}")))?;
+        // Collect the member host ids BEFORE deleting, so their credentials can
+        // be purged from the keychain (a raw cascade delete would orphan them).
+        let host_ids: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT id FROM saved_hosts WHERE group_id = ?1")?;
+            let rows = stmt.query_map(params![id], |r| r.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
         // Delete hosts first (before the group, since FK is ON DELETE SET NULL)
         conn.execute("DELETE FROM saved_hosts WHERE group_id = ?1", params![id])?;
         let affected = conn.execute("DELETE FROM host_groups WHERE id = ?1", params![id])?;
         if affected == 0 {
             return Err(DbError::NotFound(id.to_string()));
         }
-        Ok(())
+        Ok(host_ids)
     }
 
     // -----------------------------------------------------------------------

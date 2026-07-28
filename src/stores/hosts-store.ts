@@ -61,7 +61,10 @@ export const useHostsStore = create<HostsState>((set, get) => ({
       last_connected_at: null,
       connection_count: null,
     };
-    await invoke("save_host", { host: duplicate });
+    // Backend duplicate (not plain save_host): it also copies the source's
+    // keychain secret under the new id, so a password/passphrase host's copy can
+    // actually authenticate. The frontend can't read the secret to copy it here.
+    await invoke("duplicate_host", { host: duplicate, sourceId: id });
     const updated = await invoke<SavedHost[]>("list_hosts");
     set({ hosts: updated });
   },
