@@ -15,6 +15,12 @@ import type {
   PaneRuntime,
   CrossPaneTarget,
 } from "../../types/explorer";
+import {
+  classifyMoveOutcome,
+  planMoveSources,
+  reconcileFocusedId,
+  type PendingMove,
+} from "../../lib/cross-pane-move";
 
 interface ExplorerPageProps {
   /** SFTP/SCP transport session id (both live in the sftp store). */
@@ -130,7 +136,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
   // leaving none "active" and killing document-level shortcuts. Re-point focus
   // at a pane that still exists.
   useEffect(() => {
-    setFocusedId((cur) => (cur === localKey || cur === remoteId ? cur : remoteId));
+    setFocusedId((cur) => reconcileFocusedId(cur, localKey, remoteId));
   }, [localKey, remoteId]);
   // Which pane (if any) is maximized over its sibling. Dual-pane only.
   const [zoomedPaneKey, setZoomedPaneKey] = useState<string | null>(null);
@@ -156,7 +162,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
   // transfer id. When that id's transfer reports Completed, the mapped source is
   // deleted; on Failed/Cancelled it's dropped undeleted. This is what makes a
   // move safe — the source only goes away once its transfer has actually landed.
-  const pendingMoves = useRef(new Map<string, { role: "local" | "remote"; entry: ExplorerEntry }>());
+  const pendingMoves = useRef(new Map<string, PendingMove>());
 
   // Core cross-pane transfer (local↔remote), shared by copy and move. `onEnqueued`
   // (move only) receives the queued transfer ids so the source can be deleted once
@@ -197,14 +203,14 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
   const transferMove = useCallback(
     (fromRole: "local" | "remote", entries: ExplorerEntry[], targetDir?: string) => {
       transfer(fromRole, entries, (ids) => {
-        // ids[i] ↔ entries[i] (enqueue preserves order). If the backend returned
-        // a different count we can't map ids→sources safely, so we skip the
-        // auto-delete entirely: the move degrades to a copy, never a wrong delete.
-        if (ids.length !== entries.length) {
+        const plan = planMoveSources(ids, entries);
+        if (!plan) {
+          // Count mismatch: can't pair ids→sources safely, so record no pending
+          // deletions — the move degrades to a copy, never a wrong delete.
           console.warn("cross-pane move: transfer id/entry count mismatch — leaving sources in place");
           return;
         }
-        ids.forEach((id, i) => pendingMoves.current.set(id, { role: fromRole, entry: entries[i] }));
+        plan.forEach((entry, id) => pendingMoves.current.set(id, { role: fromRole, entry }));
       }, targetDir);
     },
     [transfer],
@@ -309,26 +315,23 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
           const p = event.payload;
           if (p[idField] !== remoteSessionId) return;
 
-          const status = p.status;
-          const completed = status === "Completed";
-          // Terminal failure = "Cancelled" or the object form of `Failed(String)`.
-          const failed = status === "Cancelled" || (typeof status === "object" && status !== null);
+          const outcome = classifyMoveOutcome(p.status);
 
           // Cross-pane MOVE: once a tracked transfer lands, delete its source;
           // if it failed or was cancelled, drop it undeleted (never lose data).
           const id = typeof p.transfer_id === "string" ? p.transfer_id : undefined;
           if (id && pendingMoves.current.has(id)) {
-            if (completed) {
+            if (outcome === "completed") {
               const { role, entry } = pendingMoves.current.get(id)!;
               pendingMoves.current.delete(id);
               setTimeout(() => runtimes.current[role]?.remove?.([entry]), 300);
-            } else if (failed) {
+            } else if (outcome === "failed") {
               pendingMoves.current.delete(id);
             }
           }
 
           // A completed download → refresh the local pane (see above).
-          if (p.direction === "Download" && completed) {
+          if (p.direction === "Download" && outcome === "completed") {
             setTimeout(() => runtimes.current.local?.refresh(), 300);
           }
         });
