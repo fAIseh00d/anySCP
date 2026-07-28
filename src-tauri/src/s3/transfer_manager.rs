@@ -1117,7 +1117,7 @@ async fn run_download_file(
     job_id: &str,
     bucket: &s3::Bucket,
     key: &str,
-    local_path: &PathBuf,
+    local_path: &std::path::Path,
     cancel_token: &CancellationToken,
     app_handle: &AppHandle,
 ) -> Result<(), S3Error> {
@@ -1195,6 +1195,7 @@ async fn run_download_dir(
 /// Stream one object to `local_path`, adding its bytes to the job's cumulative
 /// progress. `size` is THIS object's length (a dir job passes each object's size,
 /// a file job passes the whole-job total). Increments `files_done` on success.
+#[allow(clippy::too_many_arguments)]
 async fn download_object(
     jobs: &Arc<DashMap<String, TransferJobState>>,
     job_id: &str,
