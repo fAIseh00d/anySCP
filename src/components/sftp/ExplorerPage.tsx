@@ -19,7 +19,8 @@ import {
   classifyMoveOutcome,
   planMoveSources,
   reconcileFocusedId,
-  type PendingMove,
+  CrossPaneMoveTracker,
+  type MoveDecision,
 } from "../../lib/cross-pane-move";
 
 interface ExplorerPageProps {
@@ -158,23 +159,23 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
     runtimes.current.remote = rt;
   }, []);
 
-  // Pending source deletions for in-flight cross-pane MOVES, keyed by the queued
-  // transfer id. When that id's transfer reports Completed, the mapped source is
-  // deleted; on Failed/Cancelled it's dropped undeleted. This is what makes a
-  // move safe — the source only goes away once its transfer has actually landed.
-  const pendingMoves = useRef(new Map<string, PendingMove>());
-  // Terminal outcomes seen BEFORE their move was registered. `enqueue_upload`
-  // returns the ids via an invoke response that, for a small/fast transfer, can
-  // resolve AFTER the worker has already emitted Completed — so `onEnqueued`
-  // (which registers the pending move) runs too late for the listener to match.
-  // We stash such early outcomes here so a late registration can still act on
-  // them; entries self-expire so the map can't grow unbounded.
-  const earlyOutcomes = useRef(new Map<string, "completed" | "failed">());
+  // Reconciles cross-pane MOVE source deletions: the source is deleted only once
+  // its transfer has actually completed, whichever way the "id registered" and
+  // "transfer finished" signals happen to interleave. This is what makes a move
+  // safe. See CrossPaneMoveTracker for the ordering the tracker guards against.
+  const moveTracker = useRef(new CrossPaneMoveTracker());
 
-  // Delete a moved source once its transfer has landed. Slight delay so the
-  // destination pane's own completion refresh settles first.
-  const deleteMovedSource = useCallback((move: PendingMove) => {
-    setTimeout(() => runtimes.current[move.role]?.remove?.([move.entry]), 300);
+  // Act on a tracker decision: delete the source now, or (for a terminal that
+  // beat its registration) expire the stash so unrelated transfers can't pile up.
+  const applyMoveDecision = useCallback((decision: MoveDecision) => {
+    if (decision.action === "delete") {
+      const { move } = decision;
+      // Slight delay so the destination pane's own completion refresh settles first.
+      setTimeout(() => runtimes.current[move.role]?.remove?.([move.entry]), 300);
+    } else if (decision.action === "stash") {
+      const { id } = decision;
+      setTimeout(() => moveTracker.current.forgetEarly(id), 5_000);
+    }
   }, []);
 
   // Core cross-pane transfer (local↔remote), shared by copy and move. `onEnqueued`
@@ -224,18 +225,10 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
           return;
         }
         plan.forEach((entry, id) => {
-          const move: PendingMove = { role: fromRole, entry };
           // The transfer may already have finished before this callback ran
-          // (fast transfer beats the enqueue invoke response) — honour that
-          // early outcome instead of waiting for an event that's already gone.
-          const early = earlyOutcomes.current.get(id);
-          if (early) {
-            earlyOutcomes.current.delete(id);
-            if (early === "completed") deleteMovedSource(move);
-            // early === "failed": leave the source in place.
-          } else {
-            pendingMoves.current.set(id, move);
-          }
+          // (fast transfer beats the enqueue invoke response); the tracker
+          // honours such an early outcome instead of awaiting a spent event.
+          applyMoveDecision(moveTracker.current.register(id, { role: fromRole, entry }));
         });
       }, targetDir);
     },
@@ -365,17 +358,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
           // if it failed or was cancelled, drop it undeleted (never lose data).
           const id = typeof p.transfer_id === "string" ? p.transfer_id : undefined;
           if (id && (outcome === "completed" || outcome === "failed")) {
-            const move = pendingMoves.current.get(id);
-            if (move) {
-              pendingMoves.current.delete(id);
-              if (outcome === "completed") deleteMovedSource(move);
-            } else {
-              // Terminal state arrived before the move was registered (fast
-              // transfer). Stash it so a late onEnqueued can still reconcile;
-              // expire it so unrelated copies/downloads don't accumulate.
-              earlyOutcomes.current.set(id, outcome);
-              setTimeout(() => earlyOutcomes.current.delete(id), 5_000);
-            }
+            applyMoveDecision(moveTracker.current.terminal(id, outcome));
           }
 
           // A completed download → refresh the local pane (see above).

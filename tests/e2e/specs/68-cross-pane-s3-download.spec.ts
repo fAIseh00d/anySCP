@@ -1,11 +1,13 @@
 // Cross-pane recursive S3 download (dual-pane explorer): downloading an S3
-// "folder" (a prefix) into the local pane must mirror the WHOLE tree to disk.
-// This regresses a real data-loss bug where a prefix reported Completed after a
-// single bogus object, so a move deleted it before its contents ever landed.
-// Here we drive the recursive DownloadDir path against live MinIO and assert
-// every nested object arrives locally.
+// "folder" (a prefix) into the local pane must mirror the WHOLE tree to disk,
+// contents intact. This guards the recursive DownloadDir path — the same one
+// whose earlier shallow bug (a prefix reporting Completed before its objects
+// landed) made a directory move destructive. This spec covers the COPY/download
+// half; it asserts every nested object arrives locally with the right bytes,
+// not merely that a same-named entry appeared.
 
-import { access, mkdtemp, writeFile } from "node:fs/promises";
+import { expect } from "chai";
+import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { resetApp } from "../helpers/reset.js";
@@ -67,8 +69,8 @@ describe("cross-pane recursive S3 download (S3 → local)", () => {
         const src = await mkdtemp(join(tmpdir(), `e2e-xps3-src-${stamp}-`));
         const alphaLocal = join(src, "alpha.txt");
         const betaLocal = join(src, "beta.txt");
-        await writeFile(alphaLocal, "a\n", "utf8");
-        await writeFile(betaLocal, "b\n", "utf8");
+        await writeFile(alphaLocal, "alpha-body\n", "utf8");
+        await writeFile(betaLocal, "beta-body\n", "utf8");
 
         const prefixFolder = `xps3-${stamp}`;
         const sessionId = await activeS3SessionId();
@@ -90,5 +92,9 @@ describe("cross-pane recursive S3 download (S3 → local)", () => {
             timeout: 20_000,
             timeoutMsg: "recursive S3 download never mirrored the full tree to local disk",
         });
+
+        // Bytes, not just names — a truncated/zero-byte download must fail here.
+        expect(await readFile(alpha, "utf8")).to.equal("alpha-body\n");
+        expect(await readFile(beta, "utf8")).to.equal("beta-body\n");
     });
 });

@@ -21,6 +21,8 @@ import { waitForExplorer } from "../helpers/sftp-ops.js";
 import {
     crossPaneMove,
     enableDualPane,
+    paneEntryExists,
+    refreshPane,
     waitForBothPanes,
     waitForPaneEntry,
     type CrossPaneEntry,
@@ -91,21 +93,51 @@ describe("cross-pane move (local → remote)", () => {
         });
     });
 
+    it("moves several files at once, deleting each source only as it lands", async () => {
+        // Multi-file move exercises the id↔entry pairing and the per-id
+        // completion tracking (each transfer deletes only its own source).
+        await openDualPaneExplorer("xpane-mv-multi");
+
+        const stamp = Date.now();
+        const dir = await mkdtemp(join(tmpdir(), "e2e-xpane-mvmulti-"));
+        const names = [`m1-${stamp}.txt`, `m2-${stamp}.txt`, `m3-${stamp}.txt`];
+        const paths = names.map((n) => join(dir, n));
+        for (const p of paths) await writeFile(p, `payload ${basename(p)}\n`, "utf8");
+
+        await crossPaneMove("local", paths.map(fileEntry), REMOTE_HOME);
+
+        // Every file lands remotely…
+        for (const n of names) await waitForPaneEntry("sftp", n);
+        // …and every local source is gone.
+        await browser.waitUntil(
+            async () => {
+                const present = await Promise.all(paths.map(exists));
+                return present.every((p) => !p);
+            },
+            { timeout: 15_000, timeoutMsg: "not all local sources were deleted after the moves landed" },
+        );
+    });
+
     it("leaves the local source in place when the transfer fails", async () => {
         await openDualPaneExplorer("xpane-mv-fail");
 
         const stamp = Date.now();
         const dir = await mkdtemp(join(tmpdir(), "e2e-xpane-mvfail-"));
-        const localPath = join(dir, `kept-${stamp}.txt`);
+        const name = `kept-${stamp}.txt`;
+        const localPath = join(dir, name);
         await writeFile(localPath, "must survive a failed move\n", "utf8");
 
-        // Target a remote directory that does not exist → the upload can't
-        // land, so the move must NOT delete the source (never lose data).
+        // Target a remote directory that does not exist → the upload can't land.
+        // The "never delete on a non-completed transfer" DECISION is proven
+        // deterministically in cross-pane-move.test.ts (both event orderings);
+        // this is the integration check that a real failed move loses nothing.
         await crossPaneMove("local", [fileEntry(localPath)], `${REMOTE_HOME}/no-such-dir-${stamp}`);
 
-        // Give the (failing) transfer time to run to its terminal state, then
-        // confirm the source is still on disk.
+        // Give the (failing) transfer time to reach its terminal state, then
+        // confirm the source survived AND nothing stray landed in the home dir.
         await browser.pause(4_000);
         expect(await exists(localPath)).to.equal(true);
+        await refreshPane("sftp");
+        expect(await paneEntryExists("sftp", name)).to.equal(false);
     });
 });
