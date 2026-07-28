@@ -37,7 +37,7 @@ export function TerminalPane({ sessionId, tabId }: { sessionId: string; tabId: s
         "group/pane flex flex-col rounded-lg overflow-hidden border",
         "transition-[border-color,box-shadow] duration-[var(--duration-fast)]",
         isZoomed
-          ? "fixed-zoom absolute inset-0 z-30 border-accent/40"
+          ? "fixed-zoom absolute inset-2 z-30 border-accent/40"
           : "relative h-full w-full",
         !isZoomed && isActive && hasSplits
           ? "border-accent/40 shadow-[0_0_0_1px_oklch(var(--accent)/.12)]"
