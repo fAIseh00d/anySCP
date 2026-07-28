@@ -51,12 +51,18 @@ impl std::fmt::Debug for AuthMethod {
                 .debug_struct("Password")
                 .field("password", &REDACTED)
                 .finish(),
-            AuthMethod::PrivateKey { key_path, passphrase } => f
+            AuthMethod::PrivateKey {
+                key_path,
+                passphrase,
+            } => f
                 .debug_struct("PrivateKey")
                 .field("key_path", key_path)
                 .field("passphrase", &passphrase.as_ref().map(|_| REDACTED))
                 .finish(),
-            AuthMethod::PrivateKeyData { key_data: _, passphrase } => f
+            AuthMethod::PrivateKeyData {
+                key_data: _,
+                passphrase,
+            } => f
                 .debug_struct("PrivateKeyData")
                 .field("key_data", &REDACTED)
                 .field("passphrase", &passphrase.as_ref().map(|_| REDACTED))
@@ -111,7 +117,9 @@ mod tests {
     #[test]
     fn auth_method_debug_redacts_all_secrets() {
         let cases = [
-            AuthMethod::Password { password: "hunter2".into() },
+            AuthMethod::Password {
+                password: "hunter2".into(),
+            },
             AuthMethod::PrivateKey {
                 key_path: "/home/u/.ssh/id_ed25519".into(),
                 passphrase: Some("hunter2".into()),
@@ -129,7 +137,10 @@ mod tests {
         // Non-secret context stays visible for troubleshooting.
         let dbg = format!(
             "{:?}",
-            AuthMethod::PrivateKey { key_path: "/k".into(), passphrase: None }
+            AuthMethod::PrivateKey {
+                key_path: "/k".into(),
+                passphrase: None
+            }
         );
         assert!(dbg.contains("/k"));
     }
