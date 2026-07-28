@@ -431,6 +431,10 @@ export function ExplorerFileTable({
   const colDate = dense
     ? COL_MODIFIED
     : `${COL_MODIFIED} @3xl:w-52`;
+  // Like the date: a dense (dual) pane stays on the short "Mode"/"Cls" form and
+  // narrow width by default — no need to drag the split narrower — while a
+  // single/zoomed pane keeps the width-driven "Permissions"/"Class".
+  const colPerms = dense ? "hidden @md:block w-16 shrink-0" : COL_PERMS;
   const caps = provider.capabilities;
   const editors = useSettingsStore((s) => s.editors);
   const defaultEditorId = useSettingsStore((s) => s.defaultEditorId);
@@ -1302,15 +1306,22 @@ export function ExplorerFileTable({
           <SortArrow col={null} gap="ml-0.5" />
         </button>
 
-        {/* Last column: Permissions for SFTP, Class for S3 — minifies to "Mode"
-            (octal) on narrow panes. */}
-        <span className={`${COL_PERMS} text-[length:var(--text-xs)] font-semibold uppercase tracking-wide text-text-muted select-none truncate`}>
-          <span className="@2xl:hidden">
-            {caps.hasPermissions ? "Mode" : caps.hasStorageClass ? "Cls" : ""}
-          </span>
-          <span className="hidden @2xl:inline">
-            {caps.hasPermissions ? "Permissions" : caps.hasStorageClass ? "Class" : ""}
-          </span>
+        {/* Last column: Permissions for SFTP, Class for S3 — minifies to "Mode"/
+            "Cls" (octal) on narrow AND on dense (dual) panes; full form on a
+            single/zoomed pane. */}
+        <span className={`${colPerms} text-[length:var(--text-xs)] font-semibold uppercase tracking-wide text-text-muted select-none truncate`}>
+          {dense ? (
+            caps.hasPermissions ? "Mode" : caps.hasStorageClass ? "Cls" : ""
+          ) : (
+            <>
+              <span className="@2xl:hidden">
+                {caps.hasPermissions ? "Mode" : caps.hasStorageClass ? "Cls" : ""}
+              </span>
+              <span className="hidden @2xl:inline">
+                {caps.hasPermissions ? "Permissions" : caps.hasStorageClass ? "Class" : ""}
+              </span>
+            </>
+          )}
         </span>
       </div>
 
@@ -1557,20 +1568,29 @@ export function ExplorerFileTable({
                         ? (entry.permissionsDisplay ?? undefined)
                         : undefined
                     }
-                    className={`${COL_PERMS} font-mono text-[length:var(--text-xs)] text-text-muted tracking-tight truncate`}
+                    className={`${colPerms} font-mono text-[length:var(--text-xs)] text-text-muted tracking-tight truncate`}
                   >
                     {caps.hasPermissions ? (
-                      <>
-                        <span className="@2xl:hidden">
-                          {entry.permissions ? octalMode(entry.permissions) : ""}
-                          {isExecutableFile(entry) && (
-                            <span className="ml-0.5 text-accent font-semibold">+x</span>
-                          )}
-                        </span>
-                        <span className="hidden @2xl:inline">
-                          {entry.permissionsDisplay ?? ""}
-                        </span>
-                      </>
+                      (() => {
+                        const octal = (
+                          <>
+                            {entry.permissions ? octalMode(entry.permissions) : ""}
+                            {isExecutableFile(entry) && (
+                              <span className="ml-0.5 text-accent font-semibold">+x</span>
+                            )}
+                          </>
+                        );
+                        return dense ? (
+                          octal
+                        ) : (
+                          <>
+                            <span className="@2xl:hidden">{octal}</span>
+                            <span className="hidden @2xl:inline">
+                              {entry.permissionsDisplay ?? ""}
+                            </span>
+                          </>
+                        );
+                      })()
                     ) : caps.hasStorageClass ? (
                       (entry.storageClass ?? "—")
                     ) : (
