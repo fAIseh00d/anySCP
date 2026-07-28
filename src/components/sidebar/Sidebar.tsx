@@ -1,4 +1,4 @@
-import { useRef, useCallback, useState } from "react";
+import { useRef, useCallback, useState, useEffect } from "react";
 import { Monitor, Braces, Settings, ArrowUpDown, Plug, History, ChevronsLeft, ChevronsRight } from "lucide-react";
 import { useUiStore } from "../../stores/ui-store";
 import { useTabStore, type PageId } from "../../stores/tab-store";
@@ -34,6 +34,7 @@ function PillButton({
   onClick,
   buttonRef,
   ariaExpanded,
+  progress,
 }: {
   icon: React.ElementType;
   label: string;
@@ -43,6 +44,8 @@ function PillButton({
   onClick: () => void;
   buttonRef?: React.Ref<HTMLButtonElement>;
   ariaExpanded?: boolean;
+  /** 0–1 aggregate transfer progress; renders a thin fill bar. null = hide. */
+  progress?: number | null;
 }) {
   const [hovered, setHovered] = useState(false);
 
@@ -96,6 +99,16 @@ function PillButton({
             </span>
           )
         )}
+        {/* Ambient transfer progress — a thin fill at the base of the pill, so
+            you can glance the status without opening the popover. */}
+        {progress != null && (
+          <span className="absolute bottom-1 left-2 right-2 h-[2px] rounded-full bg-accent/20 overflow-hidden">
+            <span
+              className="block h-full rounded-full bg-accent transition-[width] duration-300 ease-out"
+              style={{ width: `${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%` }}
+            />
+          </span>
+        )}
       </button>
 
       {/* Tooltip — collapsed only */}
@@ -135,7 +148,22 @@ export function Sidebar() {
     }
     return count;
   });
+  // Aggregate byte-progress across in-flight transfers, for the ambient bar on
+  // the transfer icon. null when nothing's running (or sizes unknown).
+  const transferProgress = useTransferStore((s) => {
+    let done = 0, total = 0, active = 0;
+    for (const t of s.transfers.values()) {
+      const st = getStatusString(t.status);
+      if (st === "InProgress" || st === "Queued") {
+        done += t.bytes_transferred ?? 0;
+        total += t.total_bytes ?? 0;
+        active++;
+      }
+    }
+    return active > 0 && total > 0 ? done / total : null;
+  });
   const popoverOpen = useTransferStore((s) => s.popoverOpen);
+  const openedAuto = useTransferStore((s) => s.openedAuto);
   const togglePopover = useTransferStore((s) => s.togglePopover);
   const setPopoverOpenStore = useTransferStore((s) => s.setPopoverOpen);
   const transferBtnRef = useRef<HTMLButtonElement>(null);
@@ -147,6 +175,23 @@ export function Sidebar() {
   const handlePopoverClose = useCallback(() => {
     setPopoverOpenStore(false);
   }, [setPopoverOpenStore]);
+
+  // Auto-dismiss an AUTO-opened popover a few seconds after the last transfer
+  // finishes — so the peek is transient. A manually-opened popover stays put.
+  useEffect(() => {
+    if (!popoverOpen || !openedAuto || activeTransferCount > 0) return;
+    const timer = setTimeout(() => {
+      const s = useTransferStore.getState();
+      if (!s.popoverOpen || !s.openedAuto) return;
+      let active = 0;
+      for (const t of s.transfers.values()) {
+        const st = getStatusString(t.status);
+        if (st === "InProgress" || st === "Queued") active++;
+      }
+      if (active === 0) s.setPopoverOpen(false);
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [popoverOpen, openedAuto, activeTransferCount]);
 
   // Determine which nav item is "active" based on the active tab
   const getActiveId = (): string | null => {
@@ -211,6 +256,7 @@ export function Sidebar() {
             onClick={handleTransferClick}
             buttonRef={transferBtnRef}
             ariaExpanded={popoverOpen}
+            progress={transferProgress}
           />
 
           <PillButton
