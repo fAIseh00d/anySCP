@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FolderOpen, Cloud, HardDrive } from "lucide-react";
+import { FolderOpen, Cloud, HardDrive, Maximize2, Minimize2 } from "lucide-react";
 import { Explorer } from "../explorer/Explorer";
 import { S3Explorer } from "../s3/S3Explorer";
 import { createSftpProvider } from "../../providers/sftp-provider";
@@ -39,6 +39,8 @@ function ExplorerPane({
   transport,
   highlighted,
   onActivate,
+  zoomed,
+  onToggleZoom,
   children,
 }: {
   icon: React.ElementType;
@@ -46,14 +48,24 @@ function ExplorerPane({
   transport?: string;
   highlighted: boolean;
   onActivate: () => void;
+  /** True when this pane is maximized over its sibling. */
+  zoomed?: boolean;
+  /** Present only in dual-pane — toggles this pane's zoom. */
+  onToggleZoom?: () => void;
   children: React.ReactNode;
 }) {
   return (
     <div
       onMouseDownCapture={onActivate}
       className={[
-        "flex flex-col h-full min-h-0 rounded-lg overflow-hidden border transition-colors duration-[var(--duration-fast)]",
-        highlighted ? "border-accent/50" : "border-border/60",
+        // Solid background so a zoomed pane fully hides the sibling beneath it —
+        // the header is bg-bg-surface/80 (semi-transparent), which would
+        // otherwise let the sibling's header bleed through the overlay.
+        "flex flex-col min-h-0 rounded-lg overflow-hidden border bg-bg-base transition-colors duration-[var(--duration-fast)]",
+        // Zoom: fill the whole explorer area over the sibling, same pattern as
+        // TerminalPane (no remount, no layout-store).
+        zoomed ? "absolute inset-2 z-30 border-accent/50" : "h-full",
+        !zoomed && (highlighted ? "border-accent/50" : "border-border/60"),
       ].join(" ")}
     >
       {/* Pane header — matching terminal pane style */}
@@ -62,6 +74,21 @@ function ExplorerPane({
         <span className="text-[11px] font-mono truncate flex-1 min-w-0 text-text-primary leading-none" title={label}>
           {label}
         </span>
+        {onToggleZoom && (
+          <button
+            type="button"
+            onClick={onToggleZoom}
+            aria-label={zoomed ? "Unzoom pane" : "Zoom pane"}
+            title={zoomed ? "Restore" : "Maximize"}
+            className="shrink-0 flex items-center justify-center w-5 h-5 rounded text-text-muted hover:text-text-primary hover:bg-bg-subtle transition-colors duration-[var(--duration-fast)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {zoomed ? (
+              <Minimize2 size={12} strokeWidth={2} aria-hidden="true" />
+            ) : (
+              <Maximize2 size={12} strokeWidth={2} aria-hidden="true" />
+            )}
+          </button>
+        )}
       </div>
       <div className="flex-1 min-h-0 bg-bg-base" data-explorer-transport={transport}>
         {children}
@@ -98,6 +125,8 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
   // (its document-level listeners fire), so the two don't fight over shortcuts.
   const [ratio, setRatio] = useState(0.5);
   const [focusedId, setFocusedId] = useState(remoteId);
+  // Which pane (if any) is maximized over its sibling. Dual-pane only.
+  const [zoomedPaneKey, setZoomedPaneKey] = useState<string | null>(null);
 
   // ─── Cross-pane transfer coordinator ──────────────────────────────────────
   // Both panes register a runtime here; the coordinator drives transfers by
@@ -331,10 +360,18 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
     const paneActive = isActive && (!dualPane || content.sessionId === focusedId);
     const highlighted = dualPane && content.sessionId === focusedId;
     const onActivate = () => setFocusedId(content.sessionId);
+    const zoomed = dualPane && zoomedPaneKey === content.sessionId;
+    // Zoom is only meaningful with a sibling to maximize over.
+    const onToggleZoom = dualPane
+      ? () => {
+          setFocusedId(content.sessionId);
+          setZoomedPaneKey((k) => (k === content.sessionId ? null : content.sessionId));
+        }
+      : undefined;
 
     if (content.kind === "local") {
       return (
-        <ExplorerPane icon={HardDrive} label="Local" transport="local" highlighted={highlighted} onActivate={onActivate}>
+        <ExplorerPane icon={HardDrive} label="Local" transport="local" highlighted={highlighted} onActivate={onActivate} zoomed={zoomed} onToggleZoom={onToggleZoom}>
           {localProvider && (
             <Explorer
               provider={localProvider}
@@ -350,7 +387,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
     }
     if (content.kind === "s3") {
       return (
-        <ExplorerPane icon={Cloud} label={label} transport="s3" highlighted={highlighted} onActivate={onActivate}>
+        <ExplorerPane icon={Cloud} label={label} transport="s3" highlighted={highlighted} onActivate={onActivate} zoomed={zoomed} onToggleZoom={onToggleZoom}>
           <S3Explorer
             sessionId={content.sessionId}
             isActive={paneActive}
@@ -364,7 +401,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
     }
     if (content.kind === "sftp") {
       return (
-        <ExplorerPane icon={FolderOpen} label={label} transport={content.transport} highlighted={highlighted} onActivate={onActivate}>
+        <ExplorerPane icon={FolderOpen} label={label} transport={content.transport} highlighted={highlighted} onActivate={onActivate} zoomed={zoomed} onToggleZoom={onToggleZoom}>
           {sftpProvider && (
             <Explorer
               provider={sftpProvider}
@@ -382,11 +419,13 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
   };
 
   return (
-    <div className="flex flex-col h-full p-2">
+    // `relative` so a zoomed pane's `absolute inset-2` fills exactly this p-2
+    // content area (over its sibling).
+    <div className="relative flex flex-col h-full p-2">
       <WorkspaceArea
         node={layout}
         tabId={remoteId}
-        zoomed={false}
+        zoomed={dualPane && zoomedPaneKey !== null}
         setRatio={(_tabId, _path, r) => setRatio(r)}
         renderPane={renderPane}
       />
