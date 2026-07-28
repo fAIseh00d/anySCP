@@ -445,3 +445,10 @@ export const useSettingsStore = create<SettingsState>((set) => ({
     }
   },
 }));
+
+// E2E test hook — flip the dual-pane explorer on/off so cross-pane specs can
+// open a tab in dual-pane mode without driving the Settings UI.
+if (typeof window !== "undefined") {
+  (window as unknown as { __e2eSetDualPane?: (on: boolean) => void }).__e2eSetDualPane = (on) =>
+    useSettingsStore.getState().setExplorerDualPane(on);
+}

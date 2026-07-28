@@ -163,6 +163,19 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
   // deleted; on Failed/Cancelled it's dropped undeleted. This is what makes a
   // move safe — the source only goes away once its transfer has actually landed.
   const pendingMoves = useRef(new Map<string, PendingMove>());
+  // Terminal outcomes seen BEFORE their move was registered. `enqueue_upload`
+  // returns the ids via an invoke response that, for a small/fast transfer, can
+  // resolve AFTER the worker has already emitted Completed — so `onEnqueued`
+  // (which registers the pending move) runs too late for the listener to match.
+  // We stash such early outcomes here so a late registration can still act on
+  // them; entries self-expire so the map can't grow unbounded.
+  const earlyOutcomes = useRef(new Map<string, "completed" | "failed">());
+
+  // Delete a moved source once its transfer has landed. Slight delay so the
+  // destination pane's own completion refresh settles first.
+  const deleteMovedSource = useCallback((move: PendingMove) => {
+    setTimeout(() => runtimes.current[move.role]?.remove?.([move.entry]), 300);
+  }, []);
 
   // Core cross-pane transfer (local↔remote), shared by copy and move. `onEnqueued`
   // (move only) receives the queued transfer ids so the source can be deleted once
@@ -210,7 +223,20 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
           console.warn("cross-pane move: transfer id/entry count mismatch — leaving sources in place");
           return;
         }
-        plan.forEach((entry, id) => pendingMoves.current.set(id, { role: fromRole, entry }));
+        plan.forEach((entry, id) => {
+          const move: PendingMove = { role: fromRole, entry };
+          // The transfer may already have finished before this callback ran
+          // (fast transfer beats the enqueue invoke response) — honour that
+          // early outcome instead of waiting for an event that's already gone.
+          const early = earlyOutcomes.current.get(id);
+          if (early) {
+            earlyOutcomes.current.delete(id);
+            if (early === "completed") deleteMovedSource(move);
+            // early === "failed": leave the source in place.
+          } else {
+            pendingMoves.current.set(id, move);
+          }
+        });
       }, targetDir);
     },
     [transfer],
@@ -287,6 +313,24 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
     [crossPaneEnabled, transferCopy, transferMove, pasteFromSibling, hasSiblingClipboard],
   );
 
+  // E2E test hook — drive the cross-pane coordinator directly (both runtimes are
+  // registered by the time both panes mount), so specs can exercise the real
+  // transfer + move-source-deletion against a live server without the flaky
+  // pointer plumbing of a cross-pane drag. Only present while cross-pane is live.
+  useEffect(() => {
+    if (!crossPaneEnabled) return;
+    const w = window as unknown as {
+      __e2eCrossPaneCopy?: (from: "local" | "remote", entries: ExplorerEntry[], targetDir?: string) => void;
+      __e2eCrossPaneMove?: (from: "local" | "remote", entries: ExplorerEntry[], targetDir?: string) => void;
+    };
+    w.__e2eCrossPaneCopy = (from, entries, targetDir) => transferCopy(from, entries, targetDir);
+    w.__e2eCrossPaneMove = (from, entries, targetDir) => transferMove(from, entries, targetDir);
+    return () => {
+      w.__e2eCrossPaneCopy = undefined;
+      w.__e2eCrossPaneMove = undefined;
+    };
+  }, [crossPaneEnabled, transferCopy, transferMove]);
+
   // The remote pane self-refreshes on upload completion; downloads land in the
   // local pane, whose provider emits no transfer events — so refresh it here
   // when a download for this session finishes. The channel + id field track the
@@ -320,13 +364,17 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
           // Cross-pane MOVE: once a tracked transfer lands, delete its source;
           // if it failed or was cancelled, drop it undeleted (never lose data).
           const id = typeof p.transfer_id === "string" ? p.transfer_id : undefined;
-          if (id && pendingMoves.current.has(id)) {
-            if (outcome === "completed") {
-              const { role, entry } = pendingMoves.current.get(id)!;
+          if (id && (outcome === "completed" || outcome === "failed")) {
+            const move = pendingMoves.current.get(id);
+            if (move) {
               pendingMoves.current.delete(id);
-              setTimeout(() => runtimes.current[role]?.remove?.([entry]), 300);
-            } else if (outcome === "failed") {
-              pendingMoves.current.delete(id);
+              if (outcome === "completed") deleteMovedSource(move);
+            } else {
+              // Terminal state arrived before the move was registered (fast
+              // transfer). Stash it so a late onEnqueued can still reconcile;
+              // expire it so unrelated copies/downloads don't accumulate.
+              earlyOutcomes.current.set(id, outcome);
+              setTimeout(() => earlyOutcomes.current.delete(id), 5_000);
             }
           }
 
