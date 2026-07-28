@@ -25,9 +25,8 @@ pub struct DragOutResult {
 ///
 /// Platform note: the `drag` crate's GTK backend is X11-oriented and best-effort
 /// under Wayland. The `drag` callback (Dropped/Cancel) is the only completion
-/// signal we await, so if a platform fails to fire it the command stays pending
-/// for that drag; callers keep a re-entrancy guard that recovers on the next
-/// attempt.
+/// signal we await; if a platform fails to fire it, a timeout reclaims the
+/// blocking thread (reporting "not dropped") so it can't leak indefinitely.
 pub async fn start_native_drag(
     app: AppHandle,
     window: Window,
@@ -67,8 +66,13 @@ pub async fn start_native_drag(
         })
         .map_err(|e| format!("main-thread dispatch failed: {e}"))?;
 
-        rx.recv()
-            .map_err(|e| format!("drag result channel closed: {e}"))?
+        // A native drag gesture completes in seconds; this large backstop only
+        // catches a platform that never fires the callback, so the thread is
+        // reclaimed instead of parking forever (blocking-pool exhaustion).
+        match rx.recv_timeout(std::time::Duration::from_secs(300)) {
+            Ok(res) => res,
+            Err(_) => Ok(false),
+        }
     })
     .await
     .map_err(|e| format!("drag task failed: {e}"))?

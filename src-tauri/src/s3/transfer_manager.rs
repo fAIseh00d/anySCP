@@ -231,7 +231,7 @@ impl S3TransferManager {
 
             let (kind, total_bytes, files_total) = if meta.is_dir() {
                 let (bytes, count) = walk_local_dir_stats(&local_path).await;
-                let key_prefix = format!("{}/{}", prefix.trim_end_matches('/'), name);
+                let key_prefix = join_key(&prefix, &name);
                 (
                     TransferJobKind::UploadDir {
                         local_path: local_path.clone(),
@@ -241,7 +241,7 @@ impl S3TransferManager {
                     count,
                 )
             } else {
-                let key = format!("{}/{}", prefix.trim_end_matches('/'), name);
+                let key = join_key(&prefix, &name);
                 (
                     TransferJobKind::UploadFile {
                         local_path: local_path.clone(),
@@ -560,6 +560,17 @@ impl S3TransferManager {
 
 /// Recursively walk a local directory and return (total_bytes, file_count).
 /// Uses canonical paths to detect and skip symlink cycles.
+/// Join an S3 key prefix and a name. The bucket root is the empty prefix, so
+/// guard it — `format!("{}/{}", "", name)` would yield a phantom `/name` key.
+fn join_key(prefix: &str, name: &str) -> String {
+    let base = prefix.trim_end_matches('/');
+    if base.is_empty() {
+        name.to_string()
+    } else {
+        format!("{base}/{name}")
+    }
+}
+
 async fn walk_local_dir_stats(path: &PathBuf) -> (u64, u32) {
     let mut visited = HashSet::new();
     Box::pin(walk_local_dir_inner(path, &mut visited)).await

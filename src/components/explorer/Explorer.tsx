@@ -67,6 +67,11 @@ export function Explorer({
 
   const currentPathRef = useRef(pane.currentPath);
   currentPathRef.current = pane.currentPath;
+  // Read the listing through a ref inside stable callbacks (e.g. resolveDropDir)
+  // so their identity doesn't change every refresh and re-subscribe the
+  // window-global drag-drop listener.
+  const entriesRef = useRef(pane.entries);
+  entriesRef.current = pane.entries;
 
   // ─── Navigation ────────────────────────────────────────────────────────────
 
@@ -180,13 +185,12 @@ export function Explorer({
       const row = closestAtPoint(position.x / scale, position.y / scale, "[data-entry-row]");
       if (row && row.dataset.entryType === "Directory") {
         const name = row.dataset.entryName;
-        const target = pane.entries.find((e) => e.name === name && e.entryType === "Directory");
+        const target = entriesRef.current.find((e) => e.name === name && e.entryType === "Directory");
         if (target) return target.id;
       }
       return base;
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [pane.entries],
+    [],
   );
 
   // The OS drop event is window-global, so in a dual-pane both panes hear every
@@ -423,11 +427,9 @@ export function Explorer({
   );
 
   // ─── Dual-pane coordinator registration ───────────────────────────────────
-  // Expose this pane's cwd + transfer entry points so the sibling pane can copy
-  // files across. Upload/download run on whichever pane's provider implements
-  // them (the local pane's provider implements neither, so it contributes only
-  // cwd + refresh; the remote SFTP pane does the actual transfer in both
-  // directions). Registers once per mount — cwd is read live from the ref.
+  // Expose this pane's cwd + transfer entry points so the sibling can copy files
+  // across. Upload/download run on whichever pane's provider implements them.
+  // Registers once per mount — cwd is read live from the ref.
   useEffect(() => {
     if (!registerRuntime) return;
     const runtime: PaneRuntime = {
@@ -536,11 +538,9 @@ export function Explorer({
 
   useEffect(() => {
     if (!isTabActive) return;
-    // A new-file/folder event targeted at a specific pane (detail.paneKey — the
-    // pane whose menu/button dispatched it) is claimed only by that pane; an
-    // untargeted event (e.g. a future global hotkey) falls back to the focused
-    // pane. This keeps the inline row in the pane you acted on, not merely the
-    // focused one.
+    // A new-file/folder event with a detail.paneKey is claimed only by that
+    // pane; an untargeted event (e.g. a future global hotkey) falls back to the
+    // focused pane.
     const claims = (e: Event): boolean => {
       const key = (e as CustomEvent<{ paneKey?: string }>).detail?.paneKey;
       return key ? key === sessionId : isActive;
@@ -598,9 +598,18 @@ export function Explorer({
   // ─── Delete / Rename / Permissions / Editor ────────────────────────────────
 
   const handleDelete = useCallback(async (entriesToDelete: ExplorerEntry[]) => {
-    try {
-      for (const entry of entriesToDelete) await provider.delete(entry);
-    } catch { /* Partial deletes may occur */ }
+    // Delete each independently so one failure doesn't skip the rest; surface a
+    // summary rather than swallowing it.
+    const failed: string[] = [];
+    for (const entry of entriesToDelete) {
+      try {
+        await provider.delete(entry);
+      } catch {
+        failed.push(entry.name);
+      }
+    }
+    if (failed.length === 1) toast.error(`Couldn't delete "${failed[0]}"`);
+    else if (failed.length > 1) toast.error(`Couldn't delete ${failed.length} items`);
     void loadDirectory(currentPathRef.current);
   }, [provider, loadDirectory]);
 

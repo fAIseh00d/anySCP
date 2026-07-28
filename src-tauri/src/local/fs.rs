@@ -42,8 +42,17 @@ fn build_entry(
             };
             (ty, meta.len(), platform::mode_of(meta), modified_secs(meta))
         }
-        // Broken symlink or unreadable target.
-        None => (LocalEntryType::Symlink, 0, 0, None),
+        // Metadata unreadable: a broken symlink if the entry itself is a link,
+        // otherwise an inaccessible/vanished entry (EACCES, TOCTOU) — don't
+        // mislabel those as symlinks.
+        None => {
+            let ty = if symlink_is {
+                LocalEntryType::Symlink
+            } else {
+                LocalEntryType::Other
+            };
+            (ty, 0, 0, None)
+        }
     };
 
     let permissions_display = if permissions == 0 {
@@ -78,11 +87,12 @@ pub async fn list_dir(path: &str) -> Result<Vec<LocalEntry>, LocalError> {
         let full_path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
 
-        // symlink_metadata never follows, so it reveals whether the entry itself
-        // is a link; metadata() follows it to resolve the real type/size.
-        let symlink_is = tokio::fs::symlink_metadata(&full_path)
+        // file_type() reports symlink-ness from the dirent's cached d_type (no
+        // extra stat on Unix); metadata() then follows to resolve type/size.
+        let symlink_is = entry
+            .file_type()
             .await
-            .map(|m| m.file_type().is_symlink())
+            .map(|ft| ft.is_symlink())
             .unwrap_or(false);
         let followed = tokio::fs::metadata(&full_path).await.ok();
 

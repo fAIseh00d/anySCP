@@ -150,18 +150,11 @@ function octalMode(mode: number): string {
   return (mode & 0o7777).toString(8).padStart(3, "0");
 }
 
-// Responsive column classes (container queries — each pane is its own
-// @container). Name is the load-bearing column with a generous minimum
-// (COL_NAME); the others are fixed-width and simply SNAP show/hide (no
-// mid-resize shrinking, which looked janky). Thresholds are set so a column only
-// appears once there's room for it PLUS Name's 7rem minimum, so the row never
-// overflows/scrolls. Priority (most→least important): Name > Size > Date > Mode,
-// so when narrowing, Mode drops first and the Date persists:
-//   date: SHORT locale date only (12/3/24) — the full date+time was wider than
-//         the filename and obscured it; the timestamp is on hover instead.
-//         hidden <24rem, shown ≥24rem.
-//   mode: octal (755 +x) — hidden <28rem, octal 28–42rem, full rwx ≥42rem.
-// Header and body cells share these so the columns stay aligned.
+// Responsive column classes (each pane is its own @container). Name flexes with
+// a 7rem minimum; the others are fixed-width and SNAP show/hide at thresholds set
+// so a column only appears once there's room for it plus Name's minimum (no
+// overflow/scroll). Narrowing drops Mode first, then Date. Header and body share
+// these so columns stay aligned.
 // Sentinel selection id for the pinned ".." row, so single-click selects it
 // (visual feedback, like every other row) without it being a real entry —
 // `selectedEntries` filters against the listing, so this never leaks into
@@ -736,7 +729,7 @@ export function ExplorerFileTable({
         const paneEl = closestAtPoint(x, y, "[data-explorer-pane-key]");
         const key = paneEl?.dataset.explorerPaneKey;
         const dir = siblingTargetDirAt(x, y);
-        // dir may legitimately be "" (S3 root), so test for undefined, not falsy.
+        // dir can be "" (S3 root) — test for undefined, not falsy.
         useDragStore.getState().setTarget(key && dir !== undefined ? { paneKey: key, entryId: dir } : null);
       };
 
@@ -829,9 +822,15 @@ export function ExplorerFileTable({
         teardown();
       };
 
+      // A cancelled pointer stream (OS/browser interruption) never fires
+      // pointerup — tear down without performing a drop so listeners, the ghost,
+      // and the sibling highlight don't leak.
+      const onCancel = () => teardown();
+
       function teardown() {
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onCancel);
         window.removeEventListener("keydown", onKey);
         window.removeEventListener("keyup", onKey);
         document.removeEventListener("mouseleave", onWindowLeave);
@@ -842,6 +841,7 @@ export function ExplorerFileTable({
 
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onCancel);
       window.addEventListener("keydown", onKey);
       window.addEventListener("keyup", onKey);
       document.addEventListener("mouseleave", onWindowLeave);
@@ -950,9 +950,8 @@ export function ExplorerFileTable({
     return false;
   };
 
-  // Open the inline new-file/new-folder row in THIS pane. The dispatch carries
-  // the pane key so a keyboard-invoked menu (or a future global hotkey) opens
-  // the row in the pane it targets, not merely whichever pane is focused.
+  // Open the inline new-file/new-folder row in THIS pane — the dispatch carries
+  // the pane key so the row opens in the targeted pane.
   const startCreate = (kind: "file" | "folder") => {
     document.dispatchEvent(
       new CustomEvent(`explorer:new-${kind}`, {

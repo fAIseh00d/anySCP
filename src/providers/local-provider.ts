@@ -12,14 +12,9 @@ const SEP =
 // Transfers are cross-pane (driven by the remote provider), so
 // canUpload/canDownload are off here; presign is S3-only.
 //
-// `hasPermissions` is on so the Unix mode column renders (the backend already
-// computes it; Windows reports 0 → a blank cell). It stays read-only: the
-// provider has no `chmod`, and Explorer only wires the edit path when the
-// provider actually implements it.
-//
-// `canEditInEditor` is on: a local file is edited in place (no download/watch
-// round-trip like the remote flow), so `editInEditor` just launches the editor
-// on the path.
+// `hasPermissions` is on so the Unix mode column renders (Windows reports 0 → a
+// blank cell); read-only, since the provider has no `chmod`.
+// `canEditInEditor` is on: local files edit in place (no download/watch round-trip).
 const LOCAL_CAPABILITIES: ProviderCapabilities = {
   canRename: true,
   canCreateFile: true,

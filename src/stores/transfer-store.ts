@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import type { TransferEvent, TransferStatusValue } from "../types";
 
-/// Fix infinite history
+// Cap on retained finished-transfer history (prevents unbounded growth).
 const MAX_FINISHED_HISTORY = 200;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

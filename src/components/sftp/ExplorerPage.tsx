@@ -125,6 +125,13 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
   // (its document-level listeners fire), so the two don't fight over shortcuts.
   const [ratio, setRatio] = useState(0.5);
   const [focusedId, setFocusedId] = useState(remoteId);
+  // A session swap (e.g. the sudo toggle) changes remoteId — and the pane ids
+  // with it — so a focusedId seeded from the old id would match neither pane,
+  // leaving none "active" and killing document-level shortcuts. Re-point focus
+  // at a pane that still exists.
+  useEffect(() => {
+    setFocusedId((cur) => (cur === localKey || cur === remoteId ? cur : remoteId));
+  }, [localKey, remoteId]);
   // Which pane (if any) is maximized over its sibling. Dual-pane only.
   const [zoomedPaneKey, setZoomedPaneKey] = useState<string | null>(null);
 
@@ -132,8 +139,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
   // Both panes register a runtime here; the coordinator drives transfers by
   // calling the destination runtime's upload/download entry points. Works for
   // local↔SFTP/SCP AND local↔S3 — the coordinator is transport-agnostic (it only
-  // calls uploadInto/downloadTo). S3 can't move/copy in-pane, but cross-pane
-  // transfer is just upload/download, which it supports.
+  // calls uploadInto/downloadTo, which every remote supports).
   const crossPaneEnabled = dualPane && (!!sftpProvider || !!s3SessionId);
   const runtimes = useRef<{ local: PaneRuntime | null; remote: PaneRuntime | null }>({
     local: null,
@@ -321,8 +327,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
             }
           }
 
-          // Downloads land in the local pane, which emits no transfer events of
-          // its own — refresh it here when one for this session finishes.
+          // A completed download → refresh the local pane (see above).
           if (p.direction === "Download" && completed) {
             setTimeout(() => runtimes.current.local?.refresh(), 300);
           }

@@ -130,17 +130,21 @@ function PillButton({
   );
 }
 
-// ─── Sidebar ─────────────────────────────────────────────────────────────────
-
-export function Sidebar() {
-  const expanded = useUiStore((s) => s.sidebarExpanded);
-  const toggleSidebar = useUiStore((s) => s.toggleSidebar);
-
-  const activeTab = useTabStore((s) => s.activeTabId ? s.tabs.get(s.activeTabId) : null);
-  const openPageTab = useTabStore((s) => s.openPageTab);
-  const activateRecent = useTabStore((s) => s.activateRecentTabOfType);
-
-  const activeTransferCount = useTransferStore((s) => {
+/**
+ * The transfers button, split out so its per-tick subscriptions (count badge +
+ * aggregate progress bar) re-render only this pill, not the whole Sidebar.
+ */
+function TransferPill({
+  expanded,
+  onClick,
+  buttonRef,
+}: {
+  expanded: boolean;
+  onClick: () => void;
+  buttonRef: React.Ref<HTMLButtonElement>;
+}) {
+  const popoverOpen = useTransferStore((s) => s.popoverOpen);
+  const activeCount = useTransferStore((s) => {
     let count = 0;
     for (const t of s.transfers.values()) {
       const st = getStatusString(t.status);
@@ -148,9 +152,8 @@ export function Sidebar() {
     }
     return count;
   });
-  // Aggregate byte-progress across in-flight transfers, for the ambient bar on
-  // the transfer icon. null when nothing's running (or sizes unknown).
-  const transferProgress = useTransferStore((s) => {
+  // Aggregate byte-progress for the ambient fill bar; null when idle.
+  const progress = useTransferStore((s) => {
     let done = 0, total = 0, active = 0;
     for (const t of s.transfers.values()) {
       const st = getStatusString(t.status);
@@ -161,6 +164,41 @@ export function Sidebar() {
       }
     }
     return active > 0 && total > 0 ? done / total : null;
+  });
+
+  return (
+    <PillButton
+      icon={ArrowUpDown}
+      label="Transfers"
+      isActive={popoverOpen}
+      badge={activeCount || undefined}
+      expanded={expanded}
+      onClick={onClick}
+      buttonRef={buttonRef}
+      ariaExpanded={popoverOpen}
+      progress={progress}
+    />
+  );
+}
+
+// ─── Sidebar ─────────────────────────────────────────────────────────────────
+
+export function Sidebar() {
+  const expanded = useUiStore((s) => s.sidebarExpanded);
+  const toggleSidebar = useUiStore((s) => s.toggleSidebar);
+
+  const activeTab = useTabStore((s) => s.activeTabId ? s.tabs.get(s.activeTabId) : null);
+  const openPageTab = useTabStore((s) => s.openPageTab);
+  const activateRecent = useTabStore((s) => s.activateRecentTabOfType);
+
+  // Subscribe to a derived boolean, not the raw count/progress — those live in
+  // <TransferPill> so the per-tick progress churn doesn't re-render the shell.
+  const anyActiveTransfer = useTransferStore((s) => {
+    for (const t of s.transfers.values()) {
+      const st = getStatusString(t.status);
+      if (st === "InProgress" || st === "Queued") return true;
+    }
+    return false;
   });
   const popoverOpen = useTransferStore((s) => s.popoverOpen);
   const openedAuto = useTransferStore((s) => s.openedAuto);
@@ -179,19 +217,18 @@ export function Sidebar() {
   // Auto-dismiss an AUTO-opened popover a few seconds after the last transfer
   // finishes — so the peek is transient. A manually-opened popover stays put.
   useEffect(() => {
-    if (!popoverOpen || !openedAuto || activeTransferCount > 0) return;
+    if (!popoverOpen || !openedAuto || anyActiveTransfer) return;
     const timer = setTimeout(() => {
       const s = useTransferStore.getState();
       if (!s.popoverOpen || !s.openedAuto) return;
-      let active = 0;
       for (const t of s.transfers.values()) {
         const st = getStatusString(t.status);
-        if (st === "InProgress" || st === "Queued") active++;
+        if (st === "InProgress" || st === "Queued") return; // work resumed
       }
-      if (active === 0) s.setPopoverOpen(false);
+      s.setPopoverOpen(false);
     }, 3000);
     return () => clearTimeout(timer);
-  }, [popoverOpen, openedAuto, activeTransferCount]);
+  }, [popoverOpen, openedAuto, anyActiveTransfer]);
 
   // Determine which nav item is "active" based on the active tab
   const getActiveId = (): string | null => {
@@ -247,16 +284,10 @@ export function Sidebar() {
 
         {/* Bottom actions */}
         <div className={`flex flex-col gap-1 ${expanded ? "" : "items-center"}`}>
-          <PillButton
-            icon={ArrowUpDown}
-            label="Transfers"
-            isActive={popoverOpen}
-            badge={activeTransferCount || undefined}
+          <TransferPill
             expanded={expanded}
             onClick={handleTransferClick}
             buttonRef={transferBtnRef}
-            ariaExpanded={popoverOpen}
-            progress={transferProgress}
           />
 
           <PillButton
