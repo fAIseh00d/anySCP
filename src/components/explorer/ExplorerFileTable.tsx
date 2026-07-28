@@ -276,9 +276,15 @@ function RenameRow({
 function NewFolderRow({
   onCommit,
   onCancel,
+  colDate,
+  colPerms,
 }: {
   onCommit: (name: string) => void;
   onCancel: () => void;
+  // The size/date/perms column classes so the input row's trailing spacers line
+  // up with the listing below it (date/perms are hidden at narrow widths).
+  colDate: string;
+  colPerms: string;
 }) {
   const [value, setValue] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -322,9 +328,9 @@ function NewFolderRow({
         ].join(" ")}
         aria-label="New folder name"
       />
-      <span className="w-20" />
-      <span className="w-44" />
-      <span className="w-24" />
+      <span className="w-20 shrink-0" />
+      <span className={colDate} />
+      <span className={colPerms} />
     </div>
   );
 }
@@ -332,9 +338,14 @@ function NewFolderRow({
 function NewFileRow({
   onCommit,
   onCancel,
+  colDate,
+  colPerms,
 }: {
   onCommit: (name: string) => void;
   onCancel: () => void;
+  // See NewFolderRow: keep the trailing spacers aligned with the listing columns.
+  colDate: string;
+  colPerms: string;
 }) {
   const [value, setValue] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -378,9 +389,9 @@ function NewFileRow({
         ].join(" ")}
         aria-label="New file name"
       />
-      <span className="w-20" />
-      <span className="w-44" />
-      <span className="w-24" />
+      <span className="w-20 shrink-0" />
+      <span className={colDate} />
+      <span className={colPerms} />
     </div>
   );
 }
@@ -1357,12 +1368,16 @@ export function ExplorerFileTable({
           <NewFileRow
             onCommit={(name) => onCreateFile?.(name)}
             onCancel={() => onCancelCreateFile?.()}
+            colDate={colDate}
+            colPerms={colPerms}
           />
         )}
         {creatingFolder && (
           <NewFolderRow
             onCommit={(name) => onCreateFolder?.(name)}
             onCancel={() => onCancelCreateFolder?.()}
+            colDate={colDate}
+            colPerms={colPerms}
           />
         )}
 

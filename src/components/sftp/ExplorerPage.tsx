@@ -433,7 +433,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
             tabActive={isActive}
             registerRuntime={registerRemoteRuntime}
             crossPane={remoteCrossPane}
-            dense={dualPane}
+            dense={dualPane && !zoomed}
           />
         </ExplorerPane>
       );
