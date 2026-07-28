@@ -269,41 +269,30 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
     [transferCopy, transferMove],
   );
 
+  // Each pane's cross-pane target is the same shape mirrored by role; build both
+  // from one factory so the wiring can't drift between the two sides.
+  const makeCrossPane = useCallback(
+    (role: "local" | "remote", siblingLabel: string): CrossPaneTarget => ({
+      siblingLabel,
+      copyTo: (entries, targetDir) => transferCopy(role, entries, targetDir),
+      moveTo: (entries, targetDir) => transferMove(role, entries, targetDir),
+      syncClipboard: (clip) => {
+        crossClipboard.current = clip
+          ? { role, operation: clip.operation, entries: clip.entries }
+          : null;
+      },
+      pasteFromSibling: () => pasteFromSibling(role),
+      hasSiblingClipboard: () => hasSiblingClipboard(role),
+    }),
+    [transferCopy, transferMove, pasteFromSibling, hasSiblingClipboard],
+  );
   const localCrossPane = useMemo<CrossPaneTarget | undefined>(
-    () =>
-      crossPaneEnabled
-        ? {
-            siblingLabel: label,
-            copyTo: (entries, targetDir) => transferCopy("local", entries, targetDir),
-            moveTo: (entries, targetDir) => transferMove("local", entries, targetDir),
-            syncClipboard: (clip) => {
-              crossClipboard.current = clip
-                ? { role: "local", operation: clip.operation, entries: clip.entries }
-                : null;
-            },
-            pasteFromSibling: () => pasteFromSibling("local"),
-            hasSiblingClipboard: () => hasSiblingClipboard("local"),
-          }
-        : undefined,
-    [crossPaneEnabled, label, transferCopy, transferMove, pasteFromSibling, hasSiblingClipboard],
+    () => (crossPaneEnabled ? makeCrossPane("local", label) : undefined),
+    [crossPaneEnabled, makeCrossPane, label],
   );
   const remoteCrossPane = useMemo<CrossPaneTarget | undefined>(
-    () =>
-      crossPaneEnabled
-        ? {
-            siblingLabel: "Local",
-            copyTo: (entries, targetDir) => transferCopy("remote", entries, targetDir),
-            moveTo: (entries, targetDir) => transferMove("remote", entries, targetDir),
-            syncClipboard: (clip) => {
-              crossClipboard.current = clip
-                ? { role: "remote", operation: clip.operation, entries: clip.entries }
-                : null;
-            },
-            pasteFromSibling: () => pasteFromSibling("remote"),
-            hasSiblingClipboard: () => hasSiblingClipboard("remote"),
-          }
-        : undefined,
-    [crossPaneEnabled, transferCopy, transferMove, pasteFromSibling, hasSiblingClipboard],
+    () => (crossPaneEnabled ? makeCrossPane("remote", "Local") : undefined),
+    [crossPaneEnabled, makeCrossPane],
   );
 
   // E2E test hook — drive the cross-pane coordinator directly (both runtimes are
@@ -408,53 +397,54 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
         }
       : undefined;
 
+    // Props shared by every pane body. The chrome (icon/label/transport) and the
+    // body node are the only things that vary by kind — so pick those, then wrap
+    // in a single <ExplorerPane> rather than repeating the whole shell 3×.
+    const bodyProps = { isActive: paneActive, tabActive: isActive, dense: dualPane && !zoomed };
+    let pane: { icon: React.ElementType; label: string; transport: string; body: React.ReactNode } | null = null;
     if (content.kind === "local") {
-      return (
-        <ExplorerPane icon={HardDrive} label="Local" transport="local" highlighted={highlighted} onActivate={onActivate} zoomed={zoomed} onToggleZoom={onToggleZoom}>
-          {localProvider && (
-            <Explorer
-              provider={localProvider}
-              isActive={paneActive}
-              tabActive={isActive}
-              registerRuntime={registerLocalRuntime}
-              crossPane={localCrossPane}
-              dense={dualPane && !zoomed}
-            />
-          )}
-        </ExplorerPane>
-      );
+      pane = {
+        icon: HardDrive,
+        label: "Local",
+        transport: "local",
+        body: localProvider && (
+          <Explorer provider={localProvider} registerRuntime={registerLocalRuntime} crossPane={localCrossPane} {...bodyProps} />
+        ),
+      };
+    } else if (content.kind === "s3") {
+      pane = {
+        icon: Cloud,
+        label,
+        transport: "s3",
+        body: (
+          <S3Explorer sessionId={content.sessionId} registerRuntime={registerRemoteRuntime} crossPane={remoteCrossPane} {...bodyProps} />
+        ),
+      };
+    } else if (content.kind === "sftp") {
+      pane = {
+        icon: FolderOpen,
+        label,
+        transport: content.transport,
+        body: sftpProvider && (
+          <Explorer provider={sftpProvider} registerRuntime={registerRemoteRuntime} crossPane={remoteCrossPane} {...bodyProps} />
+        ),
+      };
     }
-    if (content.kind === "s3") {
-      return (
-        <ExplorerPane icon={Cloud} label={label} transport="s3" highlighted={highlighted} onActivate={onActivate} zoomed={zoomed} onToggleZoom={onToggleZoom}>
-          <S3Explorer
-            sessionId={content.sessionId}
-            isActive={paneActive}
-            tabActive={isActive}
-            registerRuntime={registerRemoteRuntime}
-            crossPane={remoteCrossPane}
-            dense={dualPane && !zoomed}
-          />
-        </ExplorerPane>
-      );
-    }
-    if (content.kind === "sftp") {
-      return (
-        <ExplorerPane icon={FolderOpen} label={label} transport={content.transport} highlighted={highlighted} onActivate={onActivate} zoomed={zoomed} onToggleZoom={onToggleZoom}>
-          {sftpProvider && (
-            <Explorer
-              provider={sftpProvider}
-              isActive={paneActive}
-              tabActive={isActive}
-              registerRuntime={registerRemoteRuntime}
-              crossPane={remoteCrossPane}
-              dense={dualPane && !zoomed}
-            />
-          )}
-        </ExplorerPane>
-      );
-    }
-    return null; // terminal panes never occur in an explorer tab
+    if (!pane) return null; // terminal panes never occur in an explorer tab
+
+    return (
+      <ExplorerPane
+        icon={pane.icon}
+        label={pane.label}
+        transport={pane.transport}
+        highlighted={highlighted}
+        onActivate={onActivate}
+        zoomed={zoomed}
+        onToggleZoom={onToggleZoom}
+      >
+        {pane.body}
+      </ExplorerPane>
+    );
   };
 
   return (

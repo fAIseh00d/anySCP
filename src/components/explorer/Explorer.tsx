@@ -110,57 +110,49 @@ export function Explorer({
     [provider],
   );
 
-  // The one upload path for both the toolbar dialog and OS drag-drop: it
-  // pre-checks the destination for name collisions and, if any, pauses on the
-  // overwrite dialog (returning true) instead of silently clobbering; otherwise
-  // it uploads. Works for every backend via `provider.listDir`.
+  // Destination overwrite guard shared by uploads (into a remote dir) and
+  // cross-pane downloads (into the local dir): pre-check `dir` for name
+  // collisions and, if any, pause on the overwrite dialog instead of silently
+  // clobbering; otherwise run `proceed`. Returns true when it paused. Works for
+  // every backend via `provider.listDir`.
+  const guardOverwrite = useCallback(
+    async (dir: string, names: string[], proceed: () => void | Promise<void>): Promise<boolean> => {
+      let conflicts: string[] = [];
+      try {
+        const existing = await provider.listDir(dir);
+        conflicts = conflictingNames(names, new Set(existing.map((e) => e.name)));
+      } catch {
+        // Can't read the dir (e.g. permissions) — skip the pre-check and let the
+        // transfer proceed; a real failure surfaces in the transfer popover.
+      }
+      if (conflicts.length > 0) {
+        setPendingDrop({ conflicts, targetDir: dir, proceed: () => void proceed() });
+        return true;
+      }
+      await proceed();
+      return false;
+    },
+    [provider],
+  );
+
+  // The one upload path for both the toolbar dialog and OS drag-drop.
   const startUpload = useCallback(
     async (localPaths: string[], targetDir: string, onEnqueued?: (ids: string[]) => void): Promise<boolean> => {
       if (!provider.enqueueUpload || localPaths.length === 0) return false;
-      let conflicts: string[] = [];
-      try {
-        const existing = await provider.listDir(targetDir);
-        conflicts = conflictingNames(localPaths, new Set(existing.map((e) => e.name)));
-      } catch {
-        // Can't read the target (e.g. permissions) — skip the pre-check and let
-        // the upload proceed; a real failure surfaces in the transfer popover.
-      }
-      if (conflicts.length > 0) {
-        setPendingDrop({
-          conflicts,
-          targetDir,
-          proceed: () => void uploadDropped(localPaths, targetDir, onEnqueued),
-        });
-        return true;
-      }
-      await uploadDropped(localPaths, targetDir, onEnqueued);
-      return false;
+      return guardOverwrite(targetDir, localPaths, () => uploadDropped(localPaths, targetDir, onEnqueued));
     },
-    [provider, uploadDropped],
+    [provider, uploadDropped, guardOverwrite],
   );
 
   // remote → local cross-pane download: the local pane owns the destination, so
-  // it runs the same conflict pre-check as an upload and pauses on the overwrite
-  // dialog before letting the remote pane enqueue the download. `run` performs
-  // the actual transfer into the resolved local dir.
+  // it runs the same conflict pre-check as an upload before letting the remote
+  // pane enqueue the download into the resolved local dir.
   const receiveDownload = useCallback(
     async (entries: ExplorerEntry[], run: (localDir: string) => void, targetDir?: string) => {
       const localDir = targetDir ?? currentPathRef.current;
-      let conflicts: string[] = [];
-      try {
-        const existing = await provider.listDir(localDir);
-        conflicts = conflictingNames(entries.map((e) => e.id), new Set(existing.map((e) => e.name)));
-      } catch {
-        // Can't read the local dir — skip the pre-check; a real failure surfaces
-        // in the transfer popover.
-      }
-      if (conflicts.length > 0) {
-        setPendingDrop({ conflicts, targetDir: localDir, proceed: () => run(localDir) });
-        return;
-      }
-      run(localDir);
+      await guardOverwrite(localDir, entries.map((e) => e.id), () => run(localDir));
     },
-    [provider],
+    [guardOverwrite],
   );
 
   const confirmOverwrite = useCallback(() => {
