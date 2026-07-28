@@ -152,9 +152,11 @@ pub fn edit(path: &str, editor: Option<crate::editors::EditorConfig>) -> Result<
     if !p.is_file() {
         return Err(LocalError::NotFound(path.to_string()));
     }
-    let editor = editor.or_else(crate::editors::resolve_default).ok_or_else(|| {
-        LocalError::IoError("No editor found. Add one in Settings → Editors.".to_string())
-    })?;
+    let editor = editor
+        .or_else(crate::editors::resolve_default)
+        .ok_or_else(|| {
+            LocalError::IoError("No editor found. Add one in Settings → Editors.".to_string())
+        })?;
     crate::editors::launch(&editor, p).map_err(LocalError::IoError)?;
     crate::telemetry::capture(
         "edit_external",
@@ -233,7 +235,9 @@ fn entry_name(src: &Path, raw: &str) -> Result<String, LocalError> {
 /// treated as inside `/a/b`.
 fn reject_into_self(src: &Path, target: &Path, raw: &str) -> Result<(), LocalError> {
     if target == src || target.starts_with(src) {
-        return Err(LocalError::InvalidPath(format!("Cannot move {raw} into itself")));
+        return Err(LocalError::InvalidPath(format!(
+            "Cannot move {raw} into itself"
+        )));
     }
     Ok(())
 }
@@ -311,7 +315,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         tokio::fs::create_dir(root.join("sub")).await.unwrap();
-        tokio::fs::write(root.join("a.txt"), b"hello").await.unwrap();
+        tokio::fs::write(root.join("a.txt"), b"hello")
+            .await
+            .unwrap();
 
         let mut entries = list_dir(root.to_str().unwrap()).await.unwrap();
         entries.sort_by(|a, b| a.name.cmp(&b.name));

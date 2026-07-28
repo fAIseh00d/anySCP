@@ -739,7 +739,6 @@ const MAX_DRAGOUT_DEPTH: usize = 64;
 /// enough that the OS has certainly finished copying a dropped selection.
 const DRAGOUT_STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 
-
 /// Budget shared across one drag-out, enforcing the caps above.
 struct StageBudget {
     bytes: u64,
@@ -995,7 +994,6 @@ async fn stage_entries(
 
     Ok(files)
 }
-
 
 /// Stage the selected remote files/folders to a private temp dir and start a
 /// native OS drag-out (download to desktop/Finder), resolving once the drag

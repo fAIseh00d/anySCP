@@ -70,7 +70,10 @@ pub async fn local_drag_out(
         .filter(|p| p.exists())
         .collect();
     if files.is_empty() {
-        return Ok(crate::dragout::DragOutResult { dropped: false, count: 0 });
+        return Ok(crate::dragout::DragOutResult {
+            dropped: false,
+            count: 0,
+        });
     }
     let count = files.len();
     let dropped = crate::dragout::start_native_drag(app, window, files)
