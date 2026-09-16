@@ -31,7 +31,13 @@ import { useUiStore } from "../../stores/ui-store";
 import { useTabStore } from "../../stores/tab-store";
 import { useSftpStore } from "../../stores/sftp-store";
 import { useS3Store } from "../../stores/s3-store";
-import type { SavedHost, HostGroup, RecentConnection, S3Connection } from "../../types";
+import type {
+  SavedHost,
+  HostGroup,
+  RecentConnection,
+  S3Connection,
+  DuplicateOutcome,
+} from "../../types";
 import { HostCard } from "./HostCard";
 import { GroupCard } from "./GroupCard";
 import { S3Card } from "./S3Card";
@@ -92,8 +98,19 @@ export function HostsDashboard() {
       // The old path here wrote empty "" creds (the frontend can't read the
       // source secret), so the copy connected unauthenticated and every list
       // failed with `serde xml: missing field "Name"`.
-      await invoke("s3_duplicate_connection", { id: conn.id });
-    } catch { /* best-effort */ }
+      const outcome = await invoke<DuplicateOutcome>("s3_duplicate_connection", { id: conn.id });
+      // The copy exists but its access keys didn't come across — say so now,
+      // rather than leaving the user to hit an opaque auth failure on first use.
+      if (outcome.credential_error) {
+        toast.error(
+          `Duplicated "${conn.label}", but its access keys didn't copy — re-enter them on the copy.`,
+        );
+      }
+    } catch {
+      // The command can genuinely fail (source gone from the list, DB error);
+      // swallowing it left the user clicking Duplicate with nothing happening.
+      toast.error(`Couldn't duplicate "${conn.label}".`);
+    }
     await loadS3Connections();
   };
 
@@ -372,7 +389,22 @@ export function HostsDashboard() {
     // the new id. Inlining `saveHost` here (the old path) skipped that, so a
     // duplicated password/passphrase host couldn't authenticate.
     async (host: SavedHost) => {
-      await duplicateHost(host.id);
+      const label = host.label || host.host;
+      try {
+        const outcome = await duplicateHost(host.id);
+        // The copy exists but its secret didn't come across — say so now, rather
+        // than letting the first connect fail with "server rejected credentials",
+        // which is indistinguishable from a wrong password.
+        if (outcome.credential_error) {
+          toast.error(
+            `Duplicated "${label}", but its saved credential didn't copy — re-enter it on the copy.`,
+          );
+        }
+      } catch {
+        // The store throws when the source is gone or the backend write fails;
+        // unhandled, the click just did nothing visible.
+        toast.error(`Couldn't duplicate "${label}".`);
+      }
     },
     [duplicateHost],
   );

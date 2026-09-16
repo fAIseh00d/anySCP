@@ -87,3 +87,63 @@ describe("hosts-store reorderHosts", () => {
     expect(useHostsStore.getState().hosts).toEqual([a, b, c]);
   });
 });
+
+describe("hosts-store duplicateHost", () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    useHostsStore.setState({ hosts: [a, b, c], error: null });
+  });
+
+  /** Route every command this action issues; `duplicate_host` gets `outcome`. */
+  function mockBackend(outcome: { id: string; credential_error: string | null }) {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_hosts") return Promise.resolve([a, b, c]);
+      if (cmd === "duplicate_host") return Promise.resolve(outcome);
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+  }
+
+  it("duplicates through the backend command, not a plain save_host", async () => {
+    mockBackend({ id: "new", credential_error: null });
+
+    await useHostsStore.getState().duplicateHost("a");
+
+    // `save_host` would persist the row without copying the keychain secret —
+    // exactly the bug that left duplicated password hosts unable to connect.
+    expect(invoke).not.toHaveBeenCalledWith("save_host", expect.anything());
+    expect(invoke).toHaveBeenCalledWith("duplicate_host", {
+      host: expect.objectContaining({ label: "alpha (copy)", host: "alpha.example.com" }),
+      sourceId: "a",
+    });
+  });
+
+  it("gives the copy a fresh id and resets the source's connection stats", async () => {
+    mockBackend({ id: "new", credential_error: null });
+
+    await useHostsStore.getState().duplicateHost("a");
+
+    const [, args] = invoke.mock.calls.find(([cmd]) => cmd === "duplicate_host")!;
+    const copy = (args as { host: SavedHost }).host;
+    expect(copy.id).not.toBe("a");
+    expect(copy.last_connected_at).toBeNull();
+    expect(copy.connection_count).toBeNull();
+  });
+
+  it("returns the credential-copy failure so the caller can surface it", async () => {
+    mockBackend({ id: "new", credential_error: "Keychain error: user denied access" });
+
+    const outcome = await useHostsStore.getState().duplicateHost("a");
+
+    // Swallowing this is what let a credential-less copy look healthy until it
+    // failed to authenticate with a misleading "server rejected credentials".
+    expect(outcome.credential_error).toBe("Keychain error: user denied access");
+  });
+
+  it("throws when the source host is gone", async () => {
+    mockBackend({ id: "new", credential_error: null });
+
+    await expect(useHostsStore.getState().duplicateHost("missing")).rejects.toThrow(
+      /host not found/,
+    );
+  });
+});

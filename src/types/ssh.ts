@@ -143,3 +143,15 @@ export interface ImportResult {
 export type StoredCredential =
   | { type: "Password"; password: string }
   | { type: "KeyPassphrase"; passphrase: string };
+
+// ─── Duplicate ────────────────────────────────────────────────────────────────
+
+/** Result of duplicating a saved host or S3 connection (`DuplicateOutcome` in
+ *  `src-tauri/src/db/mod.rs`). The row is always created when the command
+ *  resolves; `credential_error` is set only when the source had a stored secret
+ *  that couldn't be copied to the new id, so the UI can tell the user to
+ *  re-enter it rather than letting the copy fail at connect time. */
+export interface DuplicateOutcome {
+  id: string;
+  credential_error: string | null;
+}

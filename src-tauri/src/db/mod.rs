@@ -51,6 +51,25 @@ impl Serialize for DbError {
 // Data models
 // ---------------------------------------------------------------------------
 
+/// Outcome of duplicating a saved host or S3 connection.
+///
+/// The DB row is always written when the command returns `Ok` — only the
+/// keychain copy can fail on its own, and that failure must reach the user:
+/// a copy whose secret never came across looks healthy in the list and then
+/// fails at connect time with a misleading "server rejected credentials"
+/// (S3: `serde xml: missing field "Name"`). Reporting it as a partial success
+/// rather than an error keeps the row, which genuinely exists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateOutcome {
+    /// Id of the newly created row.
+    pub id: String,
+    /// `Some(message)` only when the source had a stored secret that could not
+    /// be copied (locked keychain, denied ACL prompt, keyring unavailable).
+    /// `None` when the secret copied AND when there was nothing to copy
+    /// (key-file/agent auth) — both leave a copy the user can connect with.
+    pub credential_error: Option<String>,
+}
+
 /// A recent connection entry joining `connection_history` with `saved_hosts`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentConnection {

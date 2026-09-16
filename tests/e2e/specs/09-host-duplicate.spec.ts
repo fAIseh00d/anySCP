@@ -61,8 +61,12 @@ describe("host duplicate", () => {
         await findHostCardByLabel("pw-original");
 
         // Duplicate: the backend must copy that secret under the new id, else the
-        // copy connects with an empty password.
-        await duplicateHost("pw-original");
+        // copy connects with an empty password. The command reports a keychain
+        // failure instead of returning a bare success, so assert it stayed clean
+        // — otherwise the connect below would fail for an unrelated-looking
+        // reason ("server rejected credentials").
+        const outcome = await duplicateHost("pw-original");
+        expect(outcome.credential_error).to.equal(null);
         const copy = await findHostCardByLabel("pw-original (copy)");
 
         // Connect the COPY (a plain click on the card connects). Reaching the

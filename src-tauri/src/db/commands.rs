@@ -4,7 +4,10 @@ use tauri::State;
 use tokio::task;
 use tracing::instrument;
 
-use super::{ConnectionHistoryEntry, DbError, HostDb, HostGroup, RecentConnection, SavedHost};
+use super::{
+    ConnectionHistoryEntry, DbError, DuplicateOutcome, HostDb, HostGroup, RecentConnection,
+    SavedHost,
+};
 
 /// Persist (insert or update) a host entry.
 ///
@@ -58,34 +61,54 @@ pub async fn delete_host(id: String, state: State<'_, Arc<HostDb>>) -> Result<()
 /// passphrase-auth copies with no credential, so they failed to authenticate.
 /// `host` is the copy (fresh id + label, reset stats); `source_id` is the
 /// original whose secret to clone.
+///
+/// The row write is authoritative (its error propagates). A keychain failure
+/// afterwards is reported in the returned [`DuplicateOutcome`] rather than
+/// swallowed: the copy exists but can't authenticate, and only the user can
+/// fix that by re-entering the secret.
 #[tauri::command]
 #[instrument(skip(state), fields(id = %host.id, source = %source_id))]
 pub async fn duplicate_host(
     host: SavedHost,
     source_id: String,
     state: State<'_, Arc<HostDb>>,
-) -> Result<(), DbError> {
+) -> Result<DuplicateOutcome, DbError> {
     let new_id = host.id.clone();
     let db = Arc::clone(&state);
     task::spawn_blocking(move || db.save_host_validated(&host))
         .await
         .map_err(|e| DbError::InitError(format!("task panicked: {e}")))??;
 
-    // Copy the secret under the new id — best-effort. A source with no stored
-    // secret (key-file auth without a passphrase, or agent auth) yields a
+    // Copy the secret under the new id. A source with no stored secret
+    // (key-file auth without a passphrase, or agent auth) yields a
     // credential-less copy, which is correct, not an error.
+    let copy_id = new_id.clone();
     let copied = task::spawn_blocking(move || match crate::vault::get_credential(&source_id) {
-        Ok(cred) => crate::vault::save_credential(&new_id, &cred),
+        Ok(cred) => crate::vault::save_credential(&copy_id, &cred),
         Err(crate::vault::VaultError::NotFound(_)) => Ok(()),
         Err(e) => Err(e),
     })
     .await;
-    if let Ok(Err(e)) = copied {
-        // The row is saved but the secret didn't copy — surface why; the user
-        // re-enters the credential rather than the duplicate silently failing.
-        tracing::warn!(error = %e, "duplicate_host: credential copy failed (copy has no stored secret)");
-    }
-    Ok(())
+
+    // Don't unwind the duplicate — the row is saved and listing it is correct.
+    // Hand the reason back so the UI can tell the user to re-enter the secret,
+    // instead of letting the copy fail later with "server rejected credentials".
+    let credential_error = match copied {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "duplicate_host: credential copy failed (copy has no stored secret)");
+            Some(e.to_string())
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "duplicate_host: credential copy task panicked");
+            Some(format!("credential copy task failed: {e}"))
+        }
+    };
+
+    Ok(DuplicateOutcome {
+        id: new_id,
+        credential_error,
+    })
 }
 
 /// Persist a manual host ordering produced by drag-and-drop on the dashboard.

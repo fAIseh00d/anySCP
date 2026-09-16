@@ -9,7 +9,7 @@ use super::{
     S3BucketInfo, S3Connection, S3Entry, S3EntryType, S3Error, S3ListResult, S3Manager,
     S3TransferEvent,
 };
-use crate::db::HostDb;
+use crate::db::{DuplicateOutcome, HostDb};
 
 // ─── Connection ──────────────────────────────────────────────────────────────
 
@@ -233,13 +233,18 @@ pub async fn s3_update_connection(
 /// under a fresh id. The credential copy is why this must be a backend command
 /// — the frontend can't read the source secret out of the keychain, so its
 /// old duplicate path left the copy with empty credentials (every list then
-/// failed to authenticate). Returns the new connection's id.
+/// failed to authenticate).
+///
+/// The row write is authoritative (its error propagates). A keychain failure
+/// afterwards is reported in the returned [`DuplicateOutcome`] rather than
+/// swallowed — otherwise the copy looks healthy and every list fails with the
+/// same cryptic `serde xml: missing field "Name"` this command exists to fix.
 #[tauri::command]
 #[instrument(skip(db))]
 pub async fn s3_duplicate_connection(
     id: String,
     db: State<'_, Arc<HostDb>>,
-) -> Result<String, S3Error> {
+) -> Result<DuplicateOutcome, S3Error> {
     let db_list = Arc::clone(&db);
     let source_id = id.clone();
     let connections = tokio::task::spawn_blocking(move || db_list.list_s3_connections())
@@ -290,13 +295,26 @@ pub async fn s3_duplicate_connection(
         }
     })
     .await;
-    if let Ok(Err(e)) = copied {
-        // A real keychain error — the copy exists in the DB but without a secret
-        // the user must re-enter. Surface why rather than leaving it silent.
-        tracing::warn!(source = %id, new = %new_id, error = %e, "S3 duplicate has no credential (copy failed)");
-    }
 
-    Ok(new_id)
+    // Don't unwind the duplicate — the row is saved and listing it is correct.
+    // Hand the reason back so the UI can tell the user to re-enter the access
+    // keys, instead of leaving a copy that fails on its first list.
+    let credential_error = match copied {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => {
+            tracing::warn!(source = %id, new = %new_id, error = %e, "S3 duplicate has no credential (copy failed)");
+            Some(e.to_string())
+        }
+        Err(e) => {
+            tracing::warn!(source = %id, new = %new_id, error = %e, "S3 duplicate credential copy task panicked");
+            Some(format!("credential copy task failed: {e}"))
+        }
+    };
+
+    Ok(DuplicateOutcome {
+        id: new_id,
+        credential_error,
+    })
 }
 
 #[tauri::command]
