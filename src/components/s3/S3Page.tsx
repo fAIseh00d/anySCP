@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Plus, Cloud, Search, Trash2, FolderOpen, Copy, Pencil } from "lucide-react";
-import type { S3Connection, DuplicateOutcome } from "../../types";
+import type { S3Connection } from "../../types";
 import { useS3Store } from "../../stores/s3-store";
 import { S3Browser } from "./S3Browser";
 import { S3ConnectDialog } from "./S3ConnectDialog";
@@ -8,7 +8,7 @@ import { ContextMenu } from "../shared/ContextMenu";
 import { ConfirmDangerDialog } from "../shared/ConfirmDangerDialog";
 import type { ContextMenuItem } from "../shared/ContextMenu";
 import type { S3Session } from "../../stores/s3-store";
-import { toast } from "../../stores/toast-store";
+import { duplicateS3Connection } from "../../lib/duplicate";
 
 export function S3Page() {
   const sessions = useS3Store((s) => s.sessions);
@@ -50,24 +50,7 @@ export function S3Page() {
   };
 
   const handleDuplicate = async (conn: S3Connection) => {
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      // Backend copies the DB row AND the keychain credential under a new id —
-      // the frontend can't read the source secret, so the old path left the
-      // copy with empty creds and every list failed to authenticate.
-      const outcome = await invoke<DuplicateOutcome>("s3_duplicate_connection", { id: conn.id });
-      // The copy exists but its access keys didn't come across — say so now,
-      // rather than leaving the user to hit an opaque auth failure on first use.
-      if (outcome.credential_error) {
-        toast.error(
-          `Duplicated "${conn.label}", but its access keys didn't copy — re-enter them on the copy.`,
-        );
-      }
-    } catch {
-      // The command can genuinely fail (source gone from the list, DB error);
-      // swallowing it left the user clicking Duplicate with nothing happening.
-      toast.error(`Couldn't duplicate "${conn.label}".`);
-    }
+    await duplicateS3Connection(conn);
     await loadSavedConnections();
   };
 

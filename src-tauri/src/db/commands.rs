@@ -90,25 +90,11 @@ pub async fn duplicate_host(
     })
     .await;
 
-    // Don't unwind the duplicate — the row is saved and listing it is correct.
-    // Hand the reason back so the UI can tell the user to re-enter the secret,
-    // instead of letting the copy fail later with "server rejected credentials".
-    let credential_error = match copied {
-        Ok(Ok(())) => None,
-        Ok(Err(e)) => {
-            tracing::warn!(error = %e, "duplicate_host: credential copy failed (copy has no stored secret)");
-            Some(e.to_string())
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "duplicate_host: credential copy task panicked");
-            Some(format!("credential copy task failed: {e}"))
-        }
-    };
-
-    Ok(DuplicateOutcome {
-        id: new_id,
-        credential_error,
-    })
+    Ok(DuplicateOutcome::from_credential_copy(
+        new_id,
+        copied,
+        "duplicate_host",
+    ))
 }
 
 /// Persist a manual host ordering produced by drag-and-drop on the dashboard.
@@ -215,7 +201,10 @@ pub async fn delete_group_with_hosts(
     // the rows. Same best-effort loop as factory_reset: a missing entry is fine,
     // and one bad key shouldn't abort the rest.
     if !host_ids.is_empty() {
-        task::spawn_blocking(move || {
+        // Ignore a panicked purge task rather than failing the command: the rows
+        // are already gone, and returning `Err` here would stop the frontend
+        // reloading, leaving deleted hosts on screen. Matches `delete_host`.
+        if task::spawn_blocking(move || {
             for host_id in &host_ids {
                 if let Err(e) = crate::vault::delete_credential(host_id) {
                     tracing::warn!(host_id = %host_id, error = %e, "delete_group_with_hosts: keychain purge failed (secret orphaned)");
@@ -223,7 +212,10 @@ pub async fn delete_group_with_hosts(
             }
         })
         .await
-        .map_err(|e| DbError::InitError(format!("task panicked: {e}")))?;
+        .is_err()
+        {
+            tracing::warn!("delete_group_with_hosts: keychain purge task panicked");
+        }
     }
     Ok(())
 }

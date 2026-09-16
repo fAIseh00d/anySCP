@@ -70,6 +70,37 @@ pub struct DuplicateOutcome {
     pub credential_error: Option<String>,
 }
 
+impl DuplicateOutcome {
+    /// Assemble the outcome from a spawned credential-copy task's result.
+    ///
+    /// `Ok(Ok(()))` covers both "secret copied" and "source had none to copy".
+    /// A vault error or a panicked task leaves the already-written row without
+    /// its secret, so both are reported rather than unwinding the duplicate —
+    /// the row genuinely exists, and only the user can supply the credential.
+    /// `command` names the caller for the log line.
+    pub(crate) fn from_credential_copy(
+        id: String,
+        copied: Result<Result<(), crate::vault::VaultError>, tokio::task::JoinError>,
+        command: &'static str,
+    ) -> Self {
+        let credential_error = match copied {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => {
+                tracing::warn!(id = %id, error = %e, "{command}: credential copy failed (copy has no stored secret)");
+                Some(e.to_string())
+            }
+            Err(e) => {
+                tracing::warn!(id = %id, error = %e, "{command}: credential copy task panicked");
+                Some(format!("credential copy task failed: {e}"))
+            }
+        };
+        Self {
+            id,
+            credential_error,
+        }
+    }
+}
+
 /// A recent connection entry joining `connection_history` with `saved_hosts`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentConnection {
@@ -1171,25 +1202,47 @@ impl HostDb {
     /// Delete a group and ALL hosts that belong to it. Returns the ids of the
     /// deleted hosts so the caller can purge their keychain secrets (the DB
     /// layer never touches the vault).
+    ///
+    /// All three statements run in one transaction. Without it, a failure on the
+    /// group DELETE would return `NotFound` with the host rows already gone —
+    /// and the caller short-circuits before the purge, orphaning exactly the
+    /// secrets this path exists to clean up. The group's existence is checked
+    /// first for the same reason: nothing is deleted for an unknown id.
     #[instrument(skip(self), fields(id = %id))]
     pub fn delete_group_with_hosts(&self, id: &str) -> Result<Vec<String>, DbError> {
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
             .map_err(|e| DbError::InitError(format!("db lock poisoned: {e}")))?;
+        let tx = conn.transaction()?;
+
+        // Reject an unknown group before touching any host row.
+        let exists: bool = tx
+            .query_row(
+                "SELECT 1 FROM host_groups WHERE id = ?1",
+                params![id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            return Err(DbError::NotFound(id.to_string()));
+        }
+
         // Collect the member host ids BEFORE deleting, so their credentials can
         // be purged from the keychain (a raw cascade delete would orphan them).
         let host_ids: Vec<String> = {
-            let mut stmt = conn.prepare("SELECT id FROM saved_hosts WHERE group_id = ?1")?;
+            let mut stmt = tx.prepare("SELECT id FROM saved_hosts WHERE group_id = ?1")?;
             let rows = stmt.query_map(params![id], |r| r.get::<_, String>(0))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
         // Delete hosts first (before the group, since FK is ON DELETE SET NULL)
-        conn.execute("DELETE FROM saved_hosts WHERE group_id = ?1", params![id])?;
-        let affected = conn.execute("DELETE FROM host_groups WHERE id = ?1", params![id])?;
-        if affected == 0 {
-            return Err(DbError::NotFound(id.to_string()));
-        }
+        tx.execute("DELETE FROM saved_hosts WHERE group_id = ?1", params![id])?;
+        tx.execute("DELETE FROM host_groups WHERE id = ?1", params![id])?;
+
+        // Commit before returning the ids: the caller purges keychain secrets
+        // for these hosts, so the rows must actually be gone first.
+        tx.commit()?;
         Ok(host_ids)
     }
 
@@ -2075,6 +2128,51 @@ mod tests {
             created_at: "2026-01-01T00:00:00".to_string(),
             updated_at: "2026-01-01T00:00:00".to_string(),
         }
+    }
+
+    #[test]
+    fn delete_group_with_hosts_returns_member_ids_and_removes_both() {
+        let (db, _dir) = test_db();
+        db.create_group(&sample_group("grp-1"))
+            .expect("create_group");
+        for id in ["host-1", "host-2"] {
+            let mut h = sample_host(id);
+            h.group_id = Some("grp-1".to_string());
+            db.save_host(&h).expect("save_host");
+        }
+        // A host outside the group must survive.
+        db.save_host(&sample_host("host-3")).expect("save_host");
+
+        let mut ids = db
+            .delete_group_with_hosts("grp-1")
+            .expect("delete_group_with_hosts");
+        ids.sort();
+
+        // The caller purges the keychain for exactly these ids.
+        assert_eq!(ids, vec!["host-1".to_string(), "host-2".to_string()]);
+        let remaining = db.list_hosts().expect("list_hosts");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "host-3");
+        assert!(db.list_groups().expect("list_groups").is_empty());
+    }
+
+    #[test]
+    fn delete_group_with_hosts_on_unknown_id_deletes_nothing() {
+        let (db, _dir) = test_db();
+        db.create_group(&sample_group("grp-1"))
+            .expect("create_group");
+        let mut h = sample_host("host-1");
+        h.group_id = Some("grp-1".to_string());
+        db.save_host(&h).expect("save_host");
+
+        // The group is checked before any host row is touched, and the whole
+        // thing is one transaction — a rejected id must leave the DB untouched.
+        // Otherwise hosts vanish while the command short-circuits before the
+        // keychain purge, orphaning exactly the secrets this path cleans up.
+        let err = db.delete_group_with_hosts("nope").unwrap_err();
+        assert!(matches!(err, DbError::NotFound(_)), "got {err:?}");
+        assert_eq!(db.list_hosts().expect("list_hosts").len(), 1);
+        assert_eq!(db.list_groups().expect("list_groups").len(), 1);
     }
 
     #[test]

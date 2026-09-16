@@ -296,25 +296,11 @@ pub async fn s3_duplicate_connection(
     })
     .await;
 
-    // Don't unwind the duplicate — the row is saved and listing it is correct.
-    // Hand the reason back so the UI can tell the user to re-enter the access
-    // keys, instead of leaving a copy that fails on its first list.
-    let credential_error = match copied {
-        Ok(Ok(())) => None,
-        Ok(Err(e)) => {
-            tracing::warn!(source = %id, new = %new_id, error = %e, "S3 duplicate has no credential (copy failed)");
-            Some(e.to_string())
-        }
-        Err(e) => {
-            tracing::warn!(source = %id, new = %new_id, error = %e, "S3 duplicate credential copy task panicked");
-            Some(format!("credential copy task failed: {e}"))
-        }
-    };
-
-    Ok(DuplicateOutcome {
-        id: new_id,
-        credential_error,
-    })
+    Ok(DuplicateOutcome::from_credential_copy(
+        new_id,
+        copied,
+        "s3_duplicate_connection",
+    ))
 }
 
 #[tauri::command]

@@ -31,13 +31,7 @@ import { useUiStore } from "../../stores/ui-store";
 import { useTabStore } from "../../stores/tab-store";
 import { useSftpStore } from "../../stores/sftp-store";
 import { useS3Store } from "../../stores/s3-store";
-import type {
-  SavedHost,
-  HostGroup,
-  RecentConnection,
-  S3Connection,
-  DuplicateOutcome,
-} from "../../types";
+import type { SavedHost, HostGroup, RecentConnection, S3Connection } from "../../types";
 import { HostCard } from "./HostCard";
 import { GroupCard } from "./GroupCard";
 import { S3Card } from "./S3Card";
@@ -47,6 +41,7 @@ import { GroupModal } from "./GroupModal";
 import { ConnectionDialog } from "./ConnectionDialog";
 import { RecentConnections } from "./RecentConnections";
 import { toast } from "../../stores/toast-store";
+import { duplicateS3Connection } from "../../lib/duplicate";
 
 // Abort an in-flight SSH connection attempt on the Rust side. Best-effort:
 // the attempt may already have settled, in which case the backend reports it
@@ -92,25 +87,7 @@ export function HostsDashboard() {
   const [editingS3Connection, setEditingS3Connection] = useState<S3Connection | null>(null);
 
   const handleS3Duplicate = async (conn: S3Connection) => {
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      // Backend copies the DB row AND the keychain credential under a new id.
-      // The old path here wrote empty "" creds (the frontend can't read the
-      // source secret), so the copy connected unauthenticated and every list
-      // failed with `serde xml: missing field "Name"`.
-      const outcome = await invoke<DuplicateOutcome>("s3_duplicate_connection", { id: conn.id });
-      // The copy exists but its access keys didn't come across — say so now,
-      // rather than leaving the user to hit an opaque auth failure on first use.
-      if (outcome.credential_error) {
-        toast.error(
-          `Duplicated "${conn.label}", but its access keys didn't copy — re-enter them on the copy.`,
-        );
-      }
-    } catch {
-      // The command can genuinely fail (source gone from the list, DB error);
-      // swallowing it left the user clicking Duplicate with nothing happening.
-      toast.error(`Couldn't duplicate "${conn.label}".`);
-    }
+    await duplicateS3Connection(conn);
     await loadS3Connections();
   };
 
@@ -528,6 +505,10 @@ export function HostsDashboard() {
           // deleteGroup reloads groups; reload hosts too since their group_id may change
           await loadHosts();
         }
+      } catch {
+        // Without this the dialog just closed: no reload, nothing shown, and an
+        // unhandled rejection from the `void handleGroupDeleteConfirm(...)` call.
+        toast.error(`Couldn't delete "${group.name}".`);
       } finally {
         // If the deleted group was selected, clear the filter
         if (selectedGroupId === group.id) {
