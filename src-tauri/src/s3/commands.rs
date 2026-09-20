@@ -353,10 +353,16 @@ pub async fn s3_delete_connection(
     // entry is visible instead of silently orphaned. `delete_credential`
     // already treats a missing entry as success.
     let vault_key = format!("s3:{id}");
-    if let Ok(Err(e)) =
-        tokio::task::spawn_blocking(move || crate::vault::delete_credential(&vault_key)).await
-    {
-        tracing::warn!(id = %id, error = %e, "S3 credential left in keychain (delete failed)");
+    match tokio::task::spawn_blocking(move || crate::vault::delete_credential(&vault_key)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(id = %id, error = %e, "S3 credential left in keychain (delete failed)");
+        }
+        // Log the panicking-task case too, rather than dropping it: otherwise a
+        // panic in the keyring backend orphans the credential with no trace.
+        Err(e) => {
+            tracing::warn!(id = %id, error = %e, "S3 credential left in keychain (purge task panicked)");
+        }
     }
 
     crate::telemetry::capture("s3_connection_deleted", serde_json::json!({}));

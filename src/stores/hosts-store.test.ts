@@ -139,6 +139,36 @@ describe("hosts-store duplicateHost", () => {
     expect(outcome.credential_error).toBe("Keychain error: user denied access");
   });
 
+  it("keeps the copy visible when the post-duplicate reload fails", async () => {
+    // Only the refetch failed here — the row and its keychain secret are
+    // written. Letting that reject reported "couldn't duplicate" over a copy
+    // that exists, dropped the outcome, and left no card on screen, so the user
+    // duplicated again: a second row plus a second keychain entry.
+    let duplicated = false;
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_hosts") {
+        return duplicated
+          ? Promise.reject(new Error("db locked"))
+          : Promise.resolve([a, b, c]);
+      }
+      if (cmd === "duplicate_host") {
+        duplicated = true;
+        return Promise.resolve({ id: "new", credential_error: null });
+      }
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+
+    const outcome = await useHostsStore.getState().duplicateHost("a");
+
+    expect(outcome.id).toBe("new");
+    expect(useHostsStore.getState().hosts.map((h) => h.label)).toEqual([
+      "alpha",
+      "bravo",
+      "charlie",
+      "alpha (copy)",
+    ]);
+  });
+
   it("throws when the source host is gone", async () => {
     mockBackend({ id: "new", credential_error: null });
 

@@ -48,8 +48,17 @@ pub async fn delete_host(id: String, state: State<'_, Arc<HostDb>>) -> Result<()
     // Honor the "delete_host and its credential are removed together" contract
     // (see vault/mod.rs) — the dashboard delete used to drop only the DB row,
     // orphaning the keychain secret for password/passphrase hosts.
-    if let Ok(Err(e)) = task::spawn_blocking(move || crate::vault::delete_credential(&id)).await {
-        tracing::warn!(error = %e, "delete_host: keychain purge failed (secret orphaned)");
+    match task::spawn_blocking(move || crate::vault::delete_credential(&id)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "delete_host: keychain purge failed (secret orphaned)");
+        }
+        // A panicking purge task (the keyring backend can panic) must not orphan
+        // the secret with no trace — the silent orphan is what this path exists
+        // to prevent. Matches `delete_group_with_hosts`.
+        Err(e) => {
+            tracing::warn!(error = %e, "delete_host: keychain purge task panicked (secret orphaned)");
+        }
     }
     Ok(())
 }

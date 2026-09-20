@@ -70,8 +70,17 @@ export const useHostsStore = create<HostsState>((set, get) => ({
       host: duplicate,
       sourceId: id,
     });
-    const updated = await invoke<SavedHost[]>("list_hosts");
-    set({ hosts: updated });
+    // The copy is written at this point, so a failed reload must not surface as
+    // a failed duplicate: that reported "couldn't duplicate" over a row that
+    // exists, dropped the credential_error, and left no card on screen — so the
+    // user clicked Duplicate again and got a second row plus a second keychain
+    // entry. Fall back to the copy we just built; it's what the backend wrote.
+    try {
+      const updated = await invoke<SavedHost[]>("list_hosts");
+      set({ hosts: updated });
+    } catch {
+      set({ hosts: [...get().hosts, duplicate] });
+    }
     return outcome;
   },
 

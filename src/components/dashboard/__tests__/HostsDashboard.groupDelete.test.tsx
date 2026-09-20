@@ -74,9 +74,12 @@ function mockBackend(cascade: () => Promise<unknown>) {
 }
 
 /** Render, then run the group card's Delete → cascade-checkbox → confirm flow. */
-async function deleteGroupWithHosts() {
+async function deleteGroupWithHosts({ selectFirst = false } = {}) {
   render(<HostsDashboard />);
   const card = await screen.findByTestId("group-card-g1");
+  // Clicking the card filters the host list to that group; a drag needs a 5px
+  // move to activate, so a plain click just selects.
+  if (selectFirst) fireEvent.click(card);
   fireEvent.contextMenu(card);
   fireEvent.click(screen.getByText("Delete Group"));
   fireEvent.click(await screen.findByRole("checkbox"));
@@ -113,5 +116,26 @@ describe("HostsDashboard group delete", () => {
     await deleteGroupWithHosts();
 
     await waitFor(() => expect(toastMessages()).toEqual(['Couldn\'t delete "prod".']));
+  });
+
+  it("keeps the group filter when the cascade fails", async () => {
+    mockBackend(() => Promise.reject(new Error("db locked")));
+
+    await deleteGroupWithHosts({ selectFirst: true });
+
+    await waitFor(() => expect(toastMessages()).toEqual(['Couldn\'t delete "prod".']));
+    // Clearing the filter in `finally` reset the sidebar to all hosts even
+    // though "prod" was still there — the delete the user was told had failed.
+    expect(screen.getByTestId("group-card-g1")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("clears the group filter once the cascade succeeds", async () => {
+    mockBackend(() => Promise.resolve(undefined));
+
+    await deleteGroupWithHosts({ selectFirst: true });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("group-card-g1")).toHaveAttribute("aria-pressed", "false"),
+    );
   });
 });

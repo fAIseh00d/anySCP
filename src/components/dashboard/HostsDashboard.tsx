@@ -354,10 +354,23 @@ export function HostsDashboard() {
 
   const handleDeleteHost = useCallback(
     async (id: string) => {
-      await deleteHost(id);
-      // deleteHost already reloads the hosts list in the store
+      const host = hosts.find((h) => h.id === id);
+      const label = host ? host.label || host.host : "host";
+      try {
+        await deleteHost(id);
+        // deleteHost already reloads the hosts list in the store
+      } catch {
+        // `delete_host` returns NotFound once the row is already gone (a
+        // "Delete Group & Hosts" cascade elsewhere in the session), and
+        // propagates any other DB error. Unhandled, the dialog just closed and
+        // the card stayed, with an unhandled rejection from the `void` call.
+        toast.error(`Couldn't delete "${label}".`);
+        // Reload so a card for an already-deleted row doesn't linger.
+        // loadHosts reports its own failure through the store's error state.
+        await loadHosts();
+      }
     },
-    [deleteHost],
+    [deleteHost, hosts, loadHosts],
   );
 
   const handleDuplicateHost = useCallback(
@@ -505,15 +518,17 @@ export function HostsDashboard() {
           // deleteGroup reloads groups; reload hosts too since their group_id may change
           await loadHosts();
         }
+        // Only on success: if the deleted group was selected, clear the filter.
+        // Clearing it in `finally` reset the sidebar to all hosts even when the
+        // delete had failed and the group was still there.
+        if (selectedGroupId === group.id) {
+          setSelectedGroupId(null);
+        }
       } catch {
         // Without this the dialog just closed: no reload, nothing shown, and an
         // unhandled rejection from the `void handleGroupDeleteConfirm(...)` call.
         toast.error(`Couldn't delete "${group.name}".`);
       } finally {
-        // If the deleted group was selected, clear the filter
-        if (selectedGroupId === group.id) {
-          setSelectedGroupId(null);
-        }
         setDeletingGroup(null);
       }
     },
