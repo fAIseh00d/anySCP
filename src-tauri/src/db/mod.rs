@@ -3026,4 +3026,80 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["a", "b"], "order unchanged after rollback");
     }
+
+    // ── DuplicateOutcome::from_credential_copy ──────────────────────────────
+    //
+    // The single place both duplicate commands (`duplicate_host`,
+    // `s3_duplicate_connection`) decide whether a copy is healthy. Getting the
+    // mapping wrong in either direction ships a real bug: a false `None` hides
+    // a credential-less copy until it fails at connect time with a misleading
+    // "server rejected credentials" / `serde xml: missing field "Name"`, and a
+    // false `Some` cries wolf over a copy that is fine.
+
+    /// A genuine `JoinError`, which can only be obtained from a real panicked
+    /// task. The panic output is silenced so the test log stays readable.
+    async fn join_error() -> tokio::task::JoinError {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let err = tokio::spawn(async { panic!("credential copy exploded") })
+            .await
+            .expect_err("task must have panicked");
+        std::panic::set_hook(prev);
+        err
+    }
+
+    #[tokio::test]
+    async fn from_credential_copy_reports_no_error_when_the_secret_copied() {
+        let outcome = DuplicateOutcome::from_credential_copy(
+            "copy-1".to_string(),
+            Ok(Ok(())),
+            "duplicate_host",
+        );
+
+        assert_eq!(outcome.id, "copy-1");
+        // `Ok(Ok(()))` also covers "the source had no secret to copy"
+        // (key-file/agent auth) — the caller maps NotFound to it — so this arm
+        // must stay clean, or every key-auth duplicate would warn spuriously.
+        assert_eq!(outcome.credential_error, None);
+    }
+
+    #[tokio::test]
+    async fn from_credential_copy_surfaces_a_vault_failure_with_its_message() {
+        let outcome = DuplicateOutcome::from_credential_copy(
+            "copy-2".to_string(),
+            Ok(Err(crate::vault::VaultError::Keychain(
+                "user denied access".to_string(),
+            ))),
+            "duplicate_host",
+        );
+
+        assert_eq!(outcome.id, "copy-2", "the row exists and is still returned");
+        // The message reaches the user, so it has to carry the cause rather
+        // than a generic failure string.
+        assert_eq!(
+            outcome.credential_error.as_deref(),
+            Some("Keychain error: user denied access"),
+        );
+    }
+
+    #[tokio::test]
+    async fn from_credential_copy_reports_a_panicked_copy_task() {
+        let outcome = DuplicateOutcome::from_credential_copy(
+            "copy-3".to_string(),
+            Err(join_error().await),
+            "s3_duplicate_connection",
+        );
+
+        assert_eq!(outcome.id, "copy-3");
+        // A panicked task leaves the row written and the secret uncopied —
+        // indistinguishable from a vault error to the user, so it must be
+        // reported, not swallowed into a clean outcome.
+        let msg = outcome
+            .credential_error
+            .expect("a panicked copy task must be reported");
+        assert!(
+            msg.contains("credential copy task failed"),
+            "unexpected message: {msg}",
+        );
+    }
 }
