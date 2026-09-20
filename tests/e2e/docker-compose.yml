@@ -213,8 +213,13 @@ services:
       start_period: 5s
 
   # ─── S3-compatible storage (MinIO) ──────────────────────────────────────────
+  # Pulled from Quay, not Docker Hub: MinIO deleted the `minio/minio` and
+  # `minio/mc` Docker Hub repositories, so `docker compose pull` failed with
+  # "pull access denied ... repository does not exist" and every E2E shard died
+  # before running a test. Pinned to a release rather than `latest` — a floating
+  # tag is what let an upstream change break CI on every branch at once.
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: anyscp-e2e-minio
     command: server /data --console-address ":9001"
     environment:
@@ -225,7 +230,7 @@ services:
   # One-shot bucket seed — creates the test bucket and uploads two objects
   # so the S3 explorer specs have something to render.
   minio-seed:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
     container_name: anyscp-e2e-minio-seed
     depends_on:
       minio:

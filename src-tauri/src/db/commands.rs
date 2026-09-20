@@ -4,7 +4,10 @@ use tauri::State;
 use tokio::task;
 use tracing::instrument;
 
-use super::{ConnectionHistoryEntry, DbError, HostDb, HostGroup, RecentConnection, SavedHost};
+use super::{
+    ConnectionHistoryEntry, DbError, DuplicateOutcome, HostDb, HostGroup, RecentConnection,
+    SavedHost,
+};
 
 /// Persist (insert or update) a host entry.
 ///
@@ -29,14 +32,78 @@ pub async fn list_hosts(state: State<'_, Arc<HostDb>>) -> Result<Vec<SavedHost>,
         .map_err(|e| DbError::InitError(format!("task panicked: {e}")))?
 }
 
-/// Permanently delete a saved host by its UUID string.
+/// Permanently delete a saved host by its UUID string, including its keychain
+/// secret. The DB delete is authoritative (its error propagates); the keychain
+/// purge is best-effort — a missing entry (key-file/agent auth) is fine, and a
+/// real failure is logged rather than orphaning the secret silently.
 #[tauri::command]
 #[instrument(skip(state), fields(id = %id))]
 pub async fn delete_host(id: String, state: State<'_, Arc<HostDb>>) -> Result<(), DbError> {
     let db = Arc::clone(&state);
-    task::spawn_blocking(move || db.delete_host(&id))
+    let del_id = id.clone();
+    task::spawn_blocking(move || db.delete_host(&del_id))
         .await
-        .map_err(|e| DbError::InitError(format!("task panicked: {e}")))?
+        .map_err(|e| DbError::InitError(format!("task panicked: {e}")))??;
+
+    // Honor the "delete_host and its credential are removed together" contract
+    // (see vault/mod.rs) — the dashboard delete used to drop only the DB row,
+    // orphaning the keychain secret for password/passphrase hosts.
+    match task::spawn_blocking(move || crate::vault::delete_credential(&id)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "delete_host: keychain purge failed (secret orphaned)");
+        }
+        // A panicking purge task (the keyring backend can panic) must not orphan
+        // the secret with no trace — the silent orphan is what this path exists
+        // to prevent. Matches `delete_group_with_hosts`.
+        Err(e) => {
+            tracing::warn!(error = %e, "delete_host: keychain purge task panicked (secret orphaned)");
+        }
+    }
+    Ok(())
+}
+
+/// Duplicate a saved host: persist the caller-built copy row AND copy its
+/// keychain secret under the new id. The credential copy is why this is a
+/// backend command — the frontend can't read the source secret out of the
+/// keychain, so a frontend-only duplicate (just `save_host`) left password- and
+/// passphrase-auth copies with no credential, so they failed to authenticate.
+/// `host` is the copy (fresh id + label, reset stats); `source_id` is the
+/// original whose secret to clone.
+///
+/// The row write is authoritative (its error propagates). A keychain failure
+/// afterwards is reported in the returned [`DuplicateOutcome`] rather than
+/// swallowed: the copy exists but can't authenticate, and only the user can
+/// fix that by re-entering the secret.
+#[tauri::command]
+#[instrument(skip(state), fields(id = %host.id, source = %source_id))]
+pub async fn duplicate_host(
+    host: SavedHost,
+    source_id: String,
+    state: State<'_, Arc<HostDb>>,
+) -> Result<DuplicateOutcome, DbError> {
+    let new_id = host.id.clone();
+    let db = Arc::clone(&state);
+    task::spawn_blocking(move || db.save_host_validated(&host))
+        .await
+        .map_err(|e| DbError::InitError(format!("task panicked: {e}")))??;
+
+    // Copy the secret under the new id. A source with no stored secret
+    // (key-file auth without a passphrase, or agent auth) yields a
+    // credential-less copy, which is correct, not an error.
+    let copy_id = new_id.clone();
+    let copied = task::spawn_blocking(move || match crate::vault::get_credential(&source_id) {
+        Ok(cred) => crate::vault::save_credential(&copy_id, &cred),
+        Err(crate::vault::VaultError::NotFound(_)) => Ok(()),
+        Err(e) => Err(e),
+    })
+    .await;
+
+    Ok(DuplicateOutcome::from_credential_copy(
+        new_id,
+        copied,
+        "duplicate_host",
+    ))
 }
 
 /// Persist a manual host ordering produced by drag-and-drop on the dashboard.
@@ -135,9 +202,31 @@ pub async fn delete_group_with_hosts(
     state: State<'_, Arc<HostDb>>,
 ) -> Result<(), DbError> {
     let db = Arc::clone(&state);
-    task::spawn_blocking(move || db.delete_group_with_hosts(&id))
+    let host_ids = task::spawn_blocking(move || db.delete_group_with_hosts(&id))
         .await
-        .map_err(|e| DbError::InitError(format!("task panicked: {e}")))?
+        .map_err(|e| DbError::InitError(format!("task panicked: {e}")))??;
+
+    // Purge each deleted host's keychain secret — the DB cascade only removed
+    // the rows. Same best-effort loop as factory_reset: a missing entry is fine,
+    // and one bad key shouldn't abort the rest.
+    if !host_ids.is_empty() {
+        // Ignore a panicked purge task rather than failing the command: the rows
+        // are already gone, and returning `Err` here would stop the frontend
+        // reloading, leaving deleted hosts on screen. Matches `delete_host`.
+        if task::spawn_blocking(move || {
+            for host_id in &host_ids {
+                if let Err(e) = crate::vault::delete_credential(host_id) {
+                    tracing::warn!(host_id = %host_id, error = %e, "delete_group_with_hosts: keychain purge failed (secret orphaned)");
+                }
+            }
+        })
+        .await
+        .is_err()
+        {
+            tracing::warn!("delete_group_with_hosts: keychain purge task panicked");
+        }
+    }
+    Ok(())
 }
 
 /// Record a successful connection for the given host id.  Also prunes the

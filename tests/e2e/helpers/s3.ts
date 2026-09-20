@@ -106,6 +106,29 @@ export async function deleteS3Connection(label: string): Promise<void> {
     );
 }
 
+export async function duplicateS3Connection(
+    label: string,
+): Promise<{ id: string; credential_error: string | null }> {
+    const id = await getS3Id(label);
+    const outcome = await browser.execute(async (cid: string) => {
+        const w = window as unknown as {
+            __e2eDuplicateS3Connection?: (
+                id: string,
+            ) => Promise<{ id: string; credential_error: string | null }>;
+            __e2eReloadS3Connections?: () => Promise<void>;
+        };
+        if (!w.__e2eDuplicateS3Connection) {
+            throw new Error("__e2eDuplicateS3Connection not registered");
+        }
+        const result = await w.__e2eDuplicateS3Connection(cid);
+        // The dashboard reloads its own list after a duplicate; do the same so
+        // the copy's card reaches the DOM before the spec looks for it.
+        if (w.__e2eReloadS3Connections) await w.__e2eReloadS3Connections();
+        return result;
+    }, id);
+    return outcome;
+}
+
 export async function s3CardCount(): Promise<number> {
     const cards = await $$("[data-s3-id]");
     return cards.length;

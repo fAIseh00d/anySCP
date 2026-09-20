@@ -51,6 +51,56 @@ impl Serialize for DbError {
 // Data models
 // ---------------------------------------------------------------------------
 
+/// Outcome of duplicating a saved host or S3 connection.
+///
+/// The DB row is always written when the command returns `Ok` — only the
+/// keychain copy can fail on its own, and that failure must reach the user:
+/// a copy whose secret never came across looks healthy in the list and then
+/// fails at connect time with a misleading "server rejected credentials"
+/// (S3: `serde xml: missing field "Name"`). Reporting it as a partial success
+/// rather than an error keeps the row, which genuinely exists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateOutcome {
+    /// Id of the newly created row.
+    pub id: String,
+    /// `Some(message)` only when the source had a stored secret that could not
+    /// be copied (locked keychain, denied ACL prompt, keyring unavailable).
+    /// `None` when the secret copied AND when there was nothing to copy
+    /// (key-file/agent auth) — both leave a copy the user can connect with.
+    pub credential_error: Option<String>,
+}
+
+impl DuplicateOutcome {
+    /// Assemble the outcome from a spawned credential-copy task's result.
+    ///
+    /// `Ok(Ok(()))` covers both "secret copied" and "source had none to copy".
+    /// A vault error or a panicked task leaves the already-written row without
+    /// its secret, so both are reported rather than unwinding the duplicate —
+    /// the row genuinely exists, and only the user can supply the credential.
+    /// `command` names the caller for the log line.
+    pub(crate) fn from_credential_copy(
+        id: String,
+        copied: Result<Result<(), crate::vault::VaultError>, tokio::task::JoinError>,
+        command: &'static str,
+    ) -> Self {
+        let credential_error = match copied {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => {
+                tracing::warn!(id = %id, error = %e, "{command}: credential copy failed (copy has no stored secret)");
+                Some(e.to_string())
+            }
+            Err(e) => {
+                tracing::warn!(id = %id, error = %e, "{command}: credential copy task panicked");
+                Some(format!("credential copy task failed: {e}"))
+            }
+        };
+        Self {
+            id,
+            credential_error,
+        }
+    }
+}
+
 /// A recent connection entry joining `connection_history` with `saved_hosts`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentConnection {
@@ -1149,20 +1199,51 @@ impl HostDb {
         Ok(())
     }
 
-    /// Delete a group and ALL hosts that belong to it.
+    /// Delete a group and ALL hosts that belong to it. Returns the ids of the
+    /// deleted hosts so the caller can purge their keychain secrets (the DB
+    /// layer never touches the vault).
+    ///
+    /// All three statements run in one transaction. Without it, a failure on the
+    /// group DELETE would return `NotFound` with the host rows already gone —
+    /// and the caller short-circuits before the purge, orphaning exactly the
+    /// secrets this path exists to clean up. The group's existence is checked
+    /// first for the same reason: nothing is deleted for an unknown id.
     #[instrument(skip(self), fields(id = %id))]
-    pub fn delete_group_with_hosts(&self, id: &str) -> Result<(), DbError> {
-        let conn = self
+    pub fn delete_group_with_hosts(&self, id: &str) -> Result<Vec<String>, DbError> {
+        let mut conn = self
             .conn
             .lock()
             .map_err(|e| DbError::InitError(format!("db lock poisoned: {e}")))?;
-        // Delete hosts first (before the group, since FK is ON DELETE SET NULL)
-        conn.execute("DELETE FROM saved_hosts WHERE group_id = ?1", params![id])?;
-        let affected = conn.execute("DELETE FROM host_groups WHERE id = ?1", params![id])?;
-        if affected == 0 {
+        let tx = conn.transaction()?;
+
+        // Reject an unknown group before touching any host row.
+        let exists: bool = tx
+            .query_row(
+                "SELECT 1 FROM host_groups WHERE id = ?1",
+                params![id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
             return Err(DbError::NotFound(id.to_string()));
         }
-        Ok(())
+
+        // Collect the member host ids BEFORE deleting, so their credentials can
+        // be purged from the keychain (a raw cascade delete would orphan them).
+        let host_ids: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT id FROM saved_hosts WHERE group_id = ?1")?;
+            let rows = stmt.query_map(params![id], |r| r.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        // Delete hosts first (before the group, since FK is ON DELETE SET NULL)
+        tx.execute("DELETE FROM saved_hosts WHERE group_id = ?1", params![id])?;
+        tx.execute("DELETE FROM host_groups WHERE id = ?1", params![id])?;
+
+        // Commit before returning the ids: the caller purges keychain secrets
+        // for these hosts, so the rows must actually be gone first.
+        tx.commit()?;
+        Ok(host_ids)
     }
 
     // -----------------------------------------------------------------------
@@ -2050,6 +2131,51 @@ mod tests {
     }
 
     #[test]
+    fn delete_group_with_hosts_returns_member_ids_and_removes_both() {
+        let (db, _dir) = test_db();
+        db.create_group(&sample_group("grp-1"))
+            .expect("create_group");
+        for id in ["host-1", "host-2"] {
+            let mut h = sample_host(id);
+            h.group_id = Some("grp-1".to_string());
+            db.save_host(&h).expect("save_host");
+        }
+        // A host outside the group must survive.
+        db.save_host(&sample_host("host-3")).expect("save_host");
+
+        let mut ids = db
+            .delete_group_with_hosts("grp-1")
+            .expect("delete_group_with_hosts");
+        ids.sort();
+
+        // The caller purges the keychain for exactly these ids.
+        assert_eq!(ids, vec!["host-1".to_string(), "host-2".to_string()]);
+        let remaining = db.list_hosts().expect("list_hosts");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "host-3");
+        assert!(db.list_groups().expect("list_groups").is_empty());
+    }
+
+    #[test]
+    fn delete_group_with_hosts_on_unknown_id_deletes_nothing() {
+        let (db, _dir) = test_db();
+        db.create_group(&sample_group("grp-1"))
+            .expect("create_group");
+        let mut h = sample_host("host-1");
+        h.group_id = Some("grp-1".to_string());
+        db.save_host(&h).expect("save_host");
+
+        // The group is checked before any host row is touched, and the whole
+        // thing is one transaction — a rejected id must leave the DB untouched.
+        // Otherwise hosts vanish while the command short-circuits before the
+        // keychain purge, orphaning exactly the secrets this path cleans up.
+        let err = db.delete_group_with_hosts("nope").unwrap_err();
+        assert!(matches!(err, DbError::NotFound(_)), "got {err:?}");
+        assert_eq!(db.list_hosts().expect("list_hosts").len(), 1);
+        assert_eq!(db.list_groups().expect("list_groups").len(), 1);
+    }
+
+    #[test]
     fn round_trip_save_and_list() {
         let (db, _dir) = test_db();
         let h = sample_host("host-1");
@@ -2899,5 +3025,81 @@ mod tests {
             .map(|g| g.id)
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["a", "b"], "order unchanged after rollback");
+    }
+
+    // ── DuplicateOutcome::from_credential_copy ──────────────────────────────
+    //
+    // The single place both duplicate commands (`duplicate_host`,
+    // `s3_duplicate_connection`) decide whether a copy is healthy. Getting the
+    // mapping wrong in either direction ships a real bug: a false `None` hides
+    // a credential-less copy until it fails at connect time with a misleading
+    // "server rejected credentials" / `serde xml: missing field "Name"`, and a
+    // false `Some` cries wolf over a copy that is fine.
+
+    /// A genuine `JoinError`, which can only be obtained from a real panicked
+    /// task. The panic output is silenced so the test log stays readable.
+    async fn join_error() -> tokio::task::JoinError {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let err = tokio::spawn(async { panic!("credential copy exploded") })
+            .await
+            .expect_err("task must have panicked");
+        std::panic::set_hook(prev);
+        err
+    }
+
+    #[tokio::test]
+    async fn from_credential_copy_reports_no_error_when_the_secret_copied() {
+        let outcome = DuplicateOutcome::from_credential_copy(
+            "copy-1".to_string(),
+            Ok(Ok(())),
+            "duplicate_host",
+        );
+
+        assert_eq!(outcome.id, "copy-1");
+        // `Ok(Ok(()))` also covers "the source had no secret to copy"
+        // (key-file/agent auth) — the caller maps NotFound to it — so this arm
+        // must stay clean, or every key-auth duplicate would warn spuriously.
+        assert_eq!(outcome.credential_error, None);
+    }
+
+    #[tokio::test]
+    async fn from_credential_copy_surfaces_a_vault_failure_with_its_message() {
+        let outcome = DuplicateOutcome::from_credential_copy(
+            "copy-2".to_string(),
+            Ok(Err(crate::vault::VaultError::Keychain(
+                "user denied access".to_string(),
+            ))),
+            "duplicate_host",
+        );
+
+        assert_eq!(outcome.id, "copy-2", "the row exists and is still returned");
+        // The message reaches the user, so it has to carry the cause rather
+        // than a generic failure string.
+        assert_eq!(
+            outcome.credential_error.as_deref(),
+            Some("Keychain error: user denied access"),
+        );
+    }
+
+    #[tokio::test]
+    async fn from_credential_copy_reports_a_panicked_copy_task() {
+        let outcome = DuplicateOutcome::from_credential_copy(
+            "copy-3".to_string(),
+            Err(join_error().await),
+            "s3_duplicate_connection",
+        );
+
+        assert_eq!(outcome.id, "copy-3");
+        // A panicked task leaves the row written and the secret uncopied —
+        // indistinguishable from a vault error to the user, so it must be
+        // reported, not swallowed into a clean outcome.
+        let msg = outcome
+            .credential_error
+            .expect("a panicked copy task must be reported");
+        assert!(
+            msg.contains("credential copy task failed"),
+            "unexpected message: {msg}",
+        );
     }
 }
