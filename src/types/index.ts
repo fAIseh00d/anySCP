@@ -16,6 +16,7 @@ export type {
   HostHealthStatus,
   HostHealthCheckResult,
   StoredCredential,
+  DuplicateOutcome,
 } from "./ssh";
 
 export type {

@@ -41,6 +41,7 @@ import { GroupModal } from "./GroupModal";
 import { ConnectionDialog } from "./ConnectionDialog";
 import { RecentConnections } from "./RecentConnections";
 import { toast } from "../../stores/toast-store";
+import { duplicateS3Connection } from "../../lib/duplicate";
 
 // Abort an in-flight SSH connection attempt on the Rust side. Best-effort:
 // the attempt may already have settled, in which case the backend reports it
@@ -57,7 +58,7 @@ async function cancelConnectAttempt(attemptId: string) {
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export function HostsDashboard() {
-  const { hosts, loadHosts, recentConnections, loadRecent, saveHost, deleteHost, reorderHosts } =
+  const { hosts, loadHosts, recentConnections, loadRecent, duplicateHost, deleteHost, reorderHosts } =
     useHostsStore();
   const { groups, loadGroups, createGroup, deleteGroup, reorderGroups } = useGroupsStore();
   const setEditingHostId = useUiStore((s) => s.setEditingHostId);
@@ -86,23 +87,7 @@ export function HostsDashboard() {
   const [editingS3Connection, setEditingS3Connection] = useState<S3Connection | null>(null);
 
   const handleS3Duplicate = async (conn: S3Connection) => {
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("s3_save_connection", {
-        label: `${conn.label} (copy)`,
-        provider: conn.provider,
-        bucketName: conn.bucket ?? "",
-        region: conn.region,
-        endpoint: conn.endpoint,
-        accessKey: "",
-        secretKey: "",
-        pathStyle: conn.path_style,
-        groupId: conn.group_id,
-        color: conn.color,
-        environment: conn.environment,
-        notes: conn.notes,
-      });
-    } catch { /* credential-less copy saved to DB */ }
+    await duplicateS3Connection(conn);
     await loadS3Connections();
   };
 
@@ -369,28 +354,49 @@ export function HostsDashboard() {
 
   const handleDeleteHost = useCallback(
     async (id: string) => {
-      await deleteHost(id);
-      // deleteHost already reloads the hosts list in the store
+      const host = hosts.find((h) => h.id === id);
+      const label = host ? host.label || host.host : "host";
+      try {
+        await deleteHost(id);
+        // deleteHost already reloads the hosts list in the store
+      } catch {
+        // `delete_host` returns NotFound once the row is already gone (a
+        // "Delete Group & Hosts" cascade elsewhere in the session), and
+        // propagates any other DB error. Unhandled, the dialog just closed and
+        // the card stayed, with an unhandled rejection from the `void` call.
+        toast.error(`Couldn't delete "${label}".`);
+        // Reload so a card for an already-deleted row doesn't linger.
+        // loadHosts reports its own failure through the store's error state.
+        await loadHosts();
+      }
     },
-    [deleteHost],
+    [deleteHost, hosts, loadHosts],
   );
 
   const handleDuplicateHost = useCallback(
+    // Delegate to the store, which builds the copy row AND calls the backend
+    // `duplicate_host` command so the source's keychain secret is copied under
+    // the new id. Inlining `saveHost` here (the old path) skipped that, so a
+    // duplicated password/passphrase host couldn't authenticate.
     async (host: SavedHost) => {
-      const now = new Date().toISOString();
-      const duplicate: SavedHost = {
-        ...host,
-        id: crypto.randomUUID(),
-        label: `${host.label || host.host} (copy)`,
-        created_at: now,
-        updated_at: now,
-        last_connected_at: null,
-        connection_count: null,
-      };
-      await saveHost(duplicate);
-      // saveHost already reloads the hosts list in the store
+      const label = host.label || host.host;
+      try {
+        const outcome = await duplicateHost(host.id);
+        // The copy exists but its secret didn't come across — say so now, rather
+        // than letting the first connect fail with "server rejected credentials",
+        // which is indistinguishable from a wrong password.
+        if (outcome.credential_error) {
+          toast.error(
+            `Duplicated "${label}", but its saved credential didn't copy — re-enter it on the copy.`,
+          );
+        }
+      } catch {
+        // The store throws when the source is gone or the backend write fails;
+        // unhandled, the click just did nothing visible.
+        toast.error(`Couldn't duplicate "${label}".`);
+      }
     },
-    [saveHost],
+    [duplicateHost],
   );
 
   // ─── Drag-and-drop reordering ────────────────────────────────────────────────
@@ -512,11 +518,17 @@ export function HostsDashboard() {
           // deleteGroup reloads groups; reload hosts too since their group_id may change
           await loadHosts();
         }
-      } finally {
-        // If the deleted group was selected, clear the filter
+        // Only on success: if the deleted group was selected, clear the filter.
+        // Clearing it in `finally` reset the sidebar to all hosts even when the
+        // delete had failed and the group was still there.
         if (selectedGroupId === group.id) {
           setSelectedGroupId(null);
         }
+      } catch {
+        // Without this the dialog just closed: no reload, nothing shown, and an
+        // unhandled rejection from the `void handleGroupDeleteConfirm(...)` call.
+        toast.error(`Couldn't delete "${group.name}".`);
+      } finally {
         setDeletingGroup(null);
       }
     },

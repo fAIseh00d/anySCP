@@ -188,14 +188,25 @@ export async function getHostId(label: string): Promise<string> {
     return id;
 }
 
-/** Duplicate a host via the store hook (avoids right-click context menu). */
-export async function duplicateHost(label: string): Promise<void> {
+/** Outcome of a duplicate, as reported by the backend command. */
+export interface DuplicateOutcome {
+    id: string;
+    credential_error: string | null;
+}
+
+/** Duplicate a host via the store hook (avoids right-click context menu).
+ *  Returns the backend outcome so a spec can assert the keychain copy landed
+ *  (`credential_error === null`) rather than only that a card appeared. */
+export async function duplicateHost(label: string): Promise<DuplicateOutcome> {
     const hostId = await getHostId(label);
-    await browser.execute(async (id: string) => {
+    return await browser.execute(async (id: string) => {
         const fn = (window as unknown as {
-            __e2eDuplicateHost?: (id: string) => Promise<void>;
+            __e2eDuplicateHost?: (id: string) => Promise<{
+                id: string;
+                credential_error: string | null;
+            }>;
         }).__e2eDuplicateHost;
         if (!fn) throw new Error("__e2eDuplicateHost not registered");
-        await fn(id);
+        return await fn(id);
     }, hostId);
 }

@@ -261,6 +261,7 @@ pub fn run() {
             db::commands::save_host,
             db::commands::list_hosts,
             db::commands::delete_host,
+            db::commands::duplicate_host,
             db::commands::reorder_hosts,
             db::commands::get_host,
             // Host groups
@@ -307,6 +308,7 @@ pub fn run() {
             s3::commands::s3_list_connections,
             s3::commands::reorder_s3_connections,
             s3::commands::s3_delete_connection,
+            s3::commands::s3_duplicate_connection,
             s3::commands::s3_reconnect,
             s3::commands::s3_update_connection,
             s3::commands::s3_create_file,
